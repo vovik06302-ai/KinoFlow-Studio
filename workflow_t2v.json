@@ -45,7 +45,10 @@
     "class_type": "CLIPTextEncode",
     "inputs": {
       "text": "{{POSITIVE_PROMPT}}",
-      "clip": ["3", 0]
+      "clip": [
+        "3",
+        0
+      ]
     },
     "_meta": {
       "title": "Positive Prompt (Photorealistic Live-Action Scene)",
@@ -56,102 +59,14 @@
     "class_type": "CLIPTextEncode",
     "inputs": {
       "text": "{{NEGATIVE_PROMPT}}",
-      "clip": ["3", 0]
+      "clip": [
+        "3",
+        0
+      ]
     },
     "_meta": {
       "title": "Negative Prompt (Anti-CGI / Photorealism Guard)",
       "comment": "СЮДА ПОДСТАВЛЯЕТСЯ строгий реалистичный Negative Prompt (без 3D render, CGI, plastic skin, cartoon, anime)."
-    }
-  },
-  "10": {
-    "class_type": "LoadImage",
-    "inputs": {
-      "image": "{{CHARACTER_1_IMAGE}}"
-    },
-    "_meta": {
-      "title": "Character Reference Photo #1 (Original Identity Anchor)",
-      "comment": "СЮДА ПОДСТАВЛЯЕТСЯ оригинальное фото 1-го персонажа (/upload/image). Сохраняется на все сегменты 10–30с."
-    }
-  },
-  "11": {
-    "class_type": "LoadImage",
-    "inputs": {
-      "image": "{{CHARACTER_2_IMAGE}}"
-    },
-    "_meta": {
-      "title": "Character Reference Photo #2 (Original Identity Anchor)",
-      "comment": "СЮДА ПОДСТАВЛЯЕТСЯ оригинальное фото 2-го персонажа."
-    }
-  },
-  "12": {
-    "class_type": "LoadImage",
-    "inputs": {
-      "image": "{{CHARACTER_3_IMAGE}}"
-    },
-    "_meta": {
-      "title": "Character Reference Photo #3 (Original Identity Anchor)",
-      "comment": "СЮДА ПОДСТАВЛЯЕТСЯ оригинальное фото 3-го персонажа."
-    }
-  },
-  "15": {
-    "class_type": "CLIPVisionLoader",
-    "inputs": {
-      "clip_name": "clip_vision_h.safetensors"
-    },
-    "_meta": {
-      "title": "CLIP Vision Encoder (Character Identity)",
-      "comment": "Кодирует загруженные референсные фото персонажей для передачи в IP-Adapter / FaceID."
-    }
-  },
-  "20": {
-    "class_type": "IPAdapterFaceID",
-    "inputs": {
-      "model": ["1", 0],
-      "clip_vision": ["15", 0],
-      "image": ["10", 0],
-      "character_name": "{{CHARACTER_1_NAME}}",
-      "weight": 0.8,
-      "weight_type": "linear",
-      "start_at": 0.0,
-      "end_at": 1.0
-    },
-    "_meta": {
-      "title": "IP-Adapter / FaceID Slot #1",
-      "comment": "СЮДА ПОДСТАВЛЯЮТСЯ имя персонажа #1 и weight (в длинных цепочках фиксируется в диапазоне 0.75–0.85 для защиты лиц)."
-    }
-  },
-  "21": {
-    "class_type": "IPAdapterFaceID",
-    "inputs": {
-      "model": ["20", 0],
-      "clip_vision": ["15", 0],
-      "image": ["11", 0],
-      "character_name": "{{CHARACTER_2_NAME}}",
-      "weight": 0.8,
-      "weight_type": "linear",
-      "start_at": 0.0,
-      "end_at": 1.0
-    },
-    "_meta": {
-      "title": "IP-Adapter / FaceID Slot #2",
-      "comment": "СЮДА ПОДСТАВЛЯЮТСЯ имя персонажа #2 и weight."
-    }
-  },
-  "22": {
-    "class_type": "IPAdapterFaceID",
-    "inputs": {
-      "model": ["21", 0],
-      "clip_vision": ["15", 0],
-      "image": ["12", 0],
-      "character_name": "{{CHARACTER_3_NAME}}",
-      "weight": 0.8,
-      "weight_type": "linear",
-      "start_at": 0.0,
-      "end_at": 1.0
-    },
-    "_meta": {
-      "title": "IP-Adapter / FaceID Slot #3",
-      "comment": "СЮДА ПОДСТАВЛЯЮТСЯ имя персонажа #3 и weight."
     }
   },
   "30": {
@@ -170,10 +85,22 @@
   "40": {
     "class_type": "KSamplerAdvanced",
     "inputs": {
-      "model": ["22", 0],
-      "positive": ["5", 0],
-      "negative": ["6", 0],
-      "latent_image": ["30", 0],
+      "model": [
+        "1",
+        0
+      ],
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ],
+      "latent_image": [
+        "30",
+        0
+      ],
       "add_noise": "enable",
       "noise_seed": 42,
       "steps": 28,
@@ -192,10 +119,22 @@
   "41": {
     "class_type": "KSamplerAdvanced",
     "inputs": {
-      "model": ["2", 0],
-      "positive": ["5", 0],
-      "negative": ["6", 0],
-      "latent_image": ["40", 0],
+      "model": [
+        "2",
+        0
+      ],
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ],
+      "latent_image": [
+        "40",
+        0
+      ],
       "add_noise": "disable",
       "noise_seed": 42,
       "steps": 28,
@@ -214,8 +153,14 @@
   "50": {
     "class_type": "VAEDecodeTiled",
     "inputs": {
-      "samples": ["41", 0],
-      "vae": ["4", 0],
+      "samples": [
+        "41",
+        0
+      ],
+      "vae": [
+        "4",
+        0
+      ],
       "tile_size": 256,
       "overlap": 64,
       "temporal_size": 64,
@@ -239,8 +184,14 @@
   "56": {
     "class_type": "ImageUpscaleWithModel",
     "inputs": {
-      "upscale_model": ["55", 0],
-      "image": ["50", 0]
+      "upscale_model": [
+        "55",
+        0
+      ],
+      "image": [
+        "50",
+        0
+      ]
     },
     "_meta": {
       "title": "Neural Cinema Upscale (Post-VAE)",
@@ -250,7 +201,10 @@
   "57": {
     "class_type": "ImageScale",
     "inputs": {
-      "image": ["56", 0],
+      "image": [
+        "56",
+        0
+      ],
       "upscale_method": "lanczos",
       "width": 1920,
       "height": 1080,
@@ -264,7 +218,10 @@
   "58": {
     "class_type": "RIFE VFI",
     "inputs": {
-      "frames": ["57", 0],
+      "frames": [
+        "57",
+        0
+      ],
       "ckpt_name": "rife49.pth",
       "clear_cache_after_n_frames": 10,
       "multiplier": 2,
@@ -280,7 +237,10 @@
   "60": {
     "class_type": "VHS_VideoCombine",
     "inputs": {
-      "images": ["58", 0],
+      "images": [
+        "58",
+        0
+      ],
       "frame_rate": 24,
       "loop_count": 0,
       "filename_prefix": "kinoflow_t2v_seg",

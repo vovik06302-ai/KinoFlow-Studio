@@ -58,7 +58,7 @@ export function CharacterReferencesPanel({
           Референсы персонажей
         </h2>
         <span className="font-mono text-xs tabular-nums text-[#94A3B8]">
-          {characters.length} / {maxCharacters} · IP-Adapter / FaceID
+          {characters.length} / {maxCharacters} · стартовый кадр
         </span>
       </div>
 
@@ -117,8 +117,8 @@ export function CharacterReferencesPanel({
 
       {characters.length === 0 ? (
         <p className="text-xs leading-relaxed text-[#64748B]">
-          Загрузите портреты персонажей, чтобы зафиксировать их внешность в сцене через IP-Adapter /
-          FaceID и сохранить имена при улучшении промпта.
+          Загрузите портрет персонажа: первое фото станет стартовым кадром сцены (режим I2V),
+          а имена сохранятся при улучшении промпта.
         </p>
       ) : (
         <ul className="divide-y divide-[#1E2330]" data-testid="character-list">
@@ -166,7 +166,7 @@ export function CharacterReferencesPanel({
                       htmlFor={`char-weight-${char.id}`}
                       className="shrink-0 text-[11px] text-[#94A3B8]"
                     >
-                      Вес IP-Adapter
+                      Вес (для цепочки сегментов)
                     </label>
                     <input
                       id={`char-weight-${char.id}`}

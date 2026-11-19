@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  AUTO_I2V_LOW_MODEL_FILE,
   AUTO_I2V_MODEL_FILE,
+  AUTO_T2V_LOW_MODEL_FILE,
   AUTO_T2V_MODEL_FILE,
   DEFAULT_NEGATIVE_PROMPT,
   buildWorkflowFromTemplate,
@@ -178,7 +180,7 @@ test('buildWorkflowFromTemplate wires 1080p Upscale (#55-#57) and RIFE VFI (#58)
   assert.equal(graph['60'].inputs.frame_rate, 30);
 });
 
-test('buildWorkflowFromTemplate I2V chains original character references with locked 0.75-0.85 weight on segment >= 2', () => {
+test('buildWorkflowFromTemplate I2V graph has no IP-Adapter nodes and every link points to an existing node', () => {
   const graph = buildWorkflowFromTemplate({
     settings: { ...baseSettings, mode: 'i2v', fps: 16 },
     positivePrompt: 'Marina turns toward the harbor lights as rain falls.',
@@ -191,18 +193,27 @@ test('buildWorkflowFromTemplate I2V chains original character references with lo
     ],
   });
 
+  assert.equal(graph['1'].class_type, 'UnetLoaderGGUF');
   assert.equal(graph['1'].inputs.unet_name, 'wan2.2_i2v_high_noise_14B_Q4_K_M.gguf');
   assert.equal(graph['2'].inputs.unet_name, 'wan2.2_i2v_low_noise_14B_Q4_K_M.gguf');
+  assert.equal(graph['3'].class_type, 'CLIPLoaderGGUF');
   assert.equal(graph['7'].class_type, 'LoadImage');
   assert.equal(graph['7'].inputs.image, 'kinoflow_chain/seg1_last_frame.png');
   assert.equal(graph['30'].class_type, 'WanImageToVideo');
   assert.deepEqual(graph['30'].inputs.start_image, ['7', 0]);
   assert.ok(graph['15'], 'CLIPVisionLoader must stay present for I2V start frame conditioning');
-  assert.equal(graph['10'].inputs.image, 'kinoflow_refs/marina.png');
-  assert.equal(graph['20'].inputs.weight, 0.75);
-  assert.equal(graph['11'].inputs.image, 'kinoflow_refs/vladimir.png');
-  assert.equal(graph['21'].inputs.weight, 0.85);
-  assert.deepEqual(graph['40'].inputs.model, ['21', 0]);
+  for (const id of ['10', '11', '12', '20', '21', '22']) {
+    assert.equal(graph[id], undefined, `node ${id} must not exist`);
+  }
+  assert.deepEqual(graph['40'].inputs.model, ['1', 0]);
+
+  for (const [id, node] of Object.entries(graph)) {
+    for (const value of Object.values(node.inputs)) {
+      if (Array.isArray(value) && typeof value[0] === 'string') {
+        assert.ok(graph[value[0]], `node ${id} links to missing node ${value[0]}`);
+      }
+    }
+  }
 });
 
 test('buildWorkflowFromTemplate switches to single-stage sampler for CogVideoX I2V', () => {
@@ -281,6 +292,7 @@ test('resolveAutoModelRoute selects T2V FP8 for fresh text-to-video and I2V FP8 
   });
   assert.equal(t2vRoute.workflowFile, 'workflow_t2v.json');
   assert.equal(t2vRoute.highNoiseModelFile, AUTO_T2V_MODEL_FILE);
+  assert.equal(t2vRoute.lowNoiseModelFile, AUTO_T2V_LOW_MODEL_FILE);
 
   const i2vStartRoute = resolveAutoModelRoute({
     modelId: 'auto',
@@ -291,6 +303,7 @@ test('resolveAutoModelRoute selects T2V FP8 for fresh text-to-video and I2V FP8 
   });
   assert.equal(i2vStartRoute.workflowFile, 'workflow_i2v.json');
   assert.equal(i2vStartRoute.highNoiseModelFile, AUTO_I2V_MODEL_FILE);
+  assert.equal(i2vStartRoute.lowNoiseModelFile, AUTO_I2V_LOW_MODEL_FILE);
 
   const extendRoute = resolveAutoModelRoute({
     modelId: 'auto',
@@ -313,7 +326,7 @@ test('resolveAutoModelRoute selects T2V FP8 for fresh text-to-video and I2V FP8 
   assert.equal(chainedRoute.highNoiseModelFile, AUTO_I2V_MODEL_FILE);
 });
 
-test('buildWorkflowFromTemplate in auto mode injects wan2.2_t2v_14B_fp8_e4m3fn for T2V and wan2.2_i2v_14B_fp8_e4m3fn for I2V / chained segments', () => {
+test('buildWorkflowFromTemplate in auto mode uses the fp8 high/low-noise safetensors from the model catalog with UNETLoader', () => {
   const t2vGraph = buildWorkflowFromTemplate({
     settings: { ...baseSettings, modelId: 'auto', mode: 't2v' },
     positivePrompt: 'A slow camera push through misty woods.',
@@ -321,9 +334,12 @@ test('buildWorkflowFromTemplate in auto mode injects wan2.2_t2v_14B_fp8_e4m3fn f
     characters: [],
     segmentIndex: 1,
   });
-  assert.equal(t2vGraph['1'].inputs.unet_name, 'wan2.2_t2v_14B_fp8_e4m3fn.safetensors');
+  assert.equal(t2vGraph['1'].class_type, 'UNETLoader');
+  assert.equal(t2vGraph['1'].inputs.unet_name, 'wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors');
+  assert.equal(t2vGraph['2'].inputs.unet_name, 'wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors');
+  assert.equal(t2vGraph['3'].class_type, 'CLIPLoader');
   assert.equal(t2vGraph['7'], undefined);
-  assert.equal(t2vGraph['41'], undefined);
+  assert.ok(t2vGraph['41'], 'auto (Wan 2.2 MoE) keeps the low-noise sampler');
 
   const i2vGraph = buildWorkflowFromTemplate({
     settings: { ...baseSettings, modelId: 'auto', mode: 't2v' },
@@ -333,7 +349,8 @@ test('buildWorkflowFromTemplate in auto mode injects wan2.2_t2v_14B_fp8_e4m3fn f
     characters: [],
     segmentIndex: 2,
   });
-  assert.equal(i2vGraph['1'].inputs.unet_name, 'wan2.2_i2v_14B_fp8_e4m3fn.safetensors');
+  assert.equal(i2vGraph['1'].inputs.unet_name, 'wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors');
+  assert.equal(i2vGraph['2'].inputs.unet_name, 'wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors');
   assert.equal(i2vGraph['7'].inputs.image, 'kinoflow_chain/seg1_last_frame.png');
   assert.equal(i2vGraph['30'].class_type, 'WanImageToVideo');
 });

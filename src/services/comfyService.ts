@@ -61,26 +61,28 @@ export function getShootingStyleOption(styleId: ShootingStyleId): ShootingStyleO
   return SHOOTING_STYLES.find((s) => s.id === styleId) ?? SHOOTING_STYLES[0];
 }
 
-export const AUTO_T2V_MODEL_FILE = 'wan2.2_t2v_14B_fp8_e4m3fn.safetensors';
-export const AUTO_I2V_MODEL_FILE = 'wan2.2_i2v_14B_fp8_e4m3fn.safetensors';
+export const AUTO_T2V_MODEL_FILE = 'wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors';
+export const AUTO_T2V_LOW_MODEL_FILE = 'wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors';
+export const AUTO_I2V_MODEL_FILE = 'wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors';
+export const AUTO_I2V_LOW_MODEL_FILE = 'wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors';
 
 export const VIDEO_MODELS: VideoModelOption[] = [
   {
     id: 'auto',
     label: 'Авто (рекомендуется) · Wan 2.2 FP8 T2V/I2V',
     shortLabel: 'Авто (Wan 2.2 FP8)',
-    architecture: 'wan22-dense',
+    architecture: 'wan22-moe',
     highNoiseFile: AUTO_T2V_MODEL_FILE,
-    lowNoiseFile: AUTO_T2V_MODEL_FILE,
+    lowNoiseFile: AUTO_T2V_LOW_MODEL_FILE,
     i2vHighNoiseFile: AUTO_I2V_MODEL_FILE,
-    i2vLowNoiseFile: AUTO_I2V_MODEL_FILE,
+    i2vLowNoiseFile: AUTO_I2V_LOW_MODEL_FILE,
     textEncoderFile: 'umt5_xxl_fp8_e4m3fn_scaled.safetensors',
     textEncoderType: 'wan',
     vaeFile: 'wan_2.1_vae.safetensors',
     defaultFps: 16,
     defaultSteps: 28,
     vramHint:
-      'Автомаршрутизация: T2V → wan2.2_t2v_14B_fp8_e4m3fn · I2V / продолжение → wan2.2_i2v_14B_fp8_e4m3fn',
+      'Автомаршрутизация: T2V → wan2.2_t2v_14B fp8 (high+low noise) · I2V / продолжение → wan2.2_i2v_14B fp8 (high+low noise)',
   },
   {
     id: 'wan22-t2v-a14b-q4',
@@ -287,7 +289,7 @@ export function planGenerationSegments(
 
 /**
  * Protects character identity across chained segments (10-30s) and Extend Scene continuations
- * by clamping IP-Adapter / FaceID weights strictly into [0.75, 0.85] on every chained segment.
+ * by clamping the character identity weight strictly into [0.75, 0.85] on every chained segment.
  */
 export function computeChainedCharacterWeight(
   baseWeight: number,
@@ -388,12 +390,12 @@ export function resolveAutoModelRoute(params: {
   const isAuto = params.modelId === 'auto';
 
   if (isAuto) {
-    const autoFile = workflowMode === 'i2v' ? AUTO_I2V_MODEL_FILE : AUTO_T2V_MODEL_FILE;
     return {
       workflowMode,
       workflowFile,
-      highNoiseModelFile: autoFile,
-      lowNoiseModelFile: autoFile,
+      highNoiseModelFile: workflowMode === 'i2v' ? AUTO_I2V_MODEL_FILE : AUTO_T2V_MODEL_FILE,
+      lowNoiseModelFile:
+        workflowMode === 'i2v' ? AUTO_I2V_LOW_MODEL_FILE : AUTO_T2V_LOW_MODEL_FILE,
       isAuto: true,
       reason,
     };
@@ -468,16 +470,31 @@ export function buildWorkflowFromTemplate(
   const splitStep = Math.max(1, Math.min(steps - 1, Math.round(steps * 0.36)));
   const segmentFrames = secondsToAlignedFrames(SEGMENT_DURATION_SEC, input.settings.fps);
 
-  if (graph['1']) {
-    graph['1'].inputs.unet_name = route.highNoiseModelFile;
-  }
-  if (graph['2']) {
-    graph['2'].inputs.unet_name = route.lowNoiseModelFile;
-  }
+  // .gguf files need the ComfyUI-GGUF loaders; .safetensors need the standard ones.
+  const configureUnetLoader = (nodeId: string, fileName: string) => {
+    const node = graph[nodeId];
+    if (!node) return;
+    node.inputs.unet_name = fileName;
+    if (fileName.toLowerCase().endsWith('.gguf')) {
+      node.class_type = 'UnetLoaderGGUF';
+      delete node.inputs.weight_dtype;
+    } else {
+      node.class_type = 'UNETLoader';
+      node.inputs.weight_dtype = 'default';
+    }
+  };
+  configureUnetLoader('1', route.highNoiseModelFile);
+  configureUnetLoader('2', route.lowNoiseModelFile);
   if (graph['3']) {
     graph['3'].inputs.clip_name = model.textEncoderFile;
     graph['3'].inputs.type = model.textEncoderType;
-    graph['3'].inputs.device = 'cpu';
+    if (model.textEncoderFile.toLowerCase().endsWith('.gguf')) {
+      graph['3'].class_type = 'CLIPLoaderGGUF';
+      delete graph['3'].inputs.device;
+    } else {
+      graph['3'].class_type = 'CLIPLoader';
+      graph['3'].inputs.device = 'cpu';
+    }
   }
   if (graph['4']) {
     graph['4'].inputs.vae_name = model.vaeFile;
@@ -493,42 +510,10 @@ export function buildWorkflowFromTemplate(
     graph['7'].inputs.image = input.startFrameFilename || '{{START_FRAME_IMAGE}}';
   }
 
-  const activeCharacters = input.characters.slice(0, 3);
-  const loadIds = ['10', '11', '12'];
-  const adapterIds = ['20', '21', '22'];
-
-  let currentModelLink: [string, number] = ['1', 0];
-
-  // Keep node 15 (CLIPVisionLoader) in I2V because node 8 encodes the start frame with it
-  if (activeCharacters.length === 0 && mode === 't2v') {
-    delete graph['15'];
-  }
-
-  for (let i = 0; i < 3; i += 1) {
-    const loadId = loadIds[i];
-    const adapterId = adapterIds[i];
-    const char = activeCharacters[i];
-
-    if (char) {
-      if (graph[loadId]) {
-        graph[loadId].inputs.image = char.imageFilename;
-      }
-      if (graph[adapterId]) {
-        graph[adapterId].inputs.model = currentModelLink;
-        graph[adapterId].inputs.image = [loadId, 0];
-        graph[adapterId].inputs.character_name = char.name.trim() || `Character ${i + 1}`;
-        graph[adapterId].inputs.weight = computeChainedCharacterWeight(
-          char.weight,
-          segmentIndex,
-          isContinuation,
-        );
-        currentModelLink = [adapterId, 0];
-      }
-    } else {
-      delete graph[loadId];
-      delete graph[adapterId];
-    }
-  }
+  // Wan 2.2 has no IP-Adapter / FaceID support, so character photos are not injected into the
+  // sampler graph. Identity is carried by the start frame (see runComfyGeneration) and by the
+  // last-frame chaining between 5-second segments.
+  // CLIP Vision (node 15) is only needed in I2V; the T2V template does not contain it.
 
   if (graph['30']) {
     graph['30'].inputs.width = input.settings.width;
@@ -537,7 +522,7 @@ export function buildWorkflowFromTemplate(
   }
 
   if (graph['40']) {
-    graph['40'].inputs.model = currentModelLink;
+    graph['40'].inputs.model = ['1', 0];
     graph['40'].inputs.noise_seed = seed;
     graph['40'].inputs.steps = steps;
     graph['40'].inputs.end_at_step = model.architecture === 'wan22-moe' ? splitStep : steps;
@@ -1188,6 +1173,12 @@ export async function runComfyGeneration(
   }
 
   let currentStartFrameFilename: string | undefined;
+
+  // Wan 2.2 cannot take face references directly, so with no explicit start frame the first
+  // character photo is used as the start frame: segment 1 then runs through I2V.
+  if (!startFrame && !isContinuation && uploadedChars.length > 0) {
+    currentStartFrameFilename = uploadedChars[0].imageFilename;
+  }
 
   if (settings.mode === 'i2v' && startFrame) {
     if (signal.aborted) {
