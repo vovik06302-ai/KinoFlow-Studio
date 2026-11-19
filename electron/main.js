@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from 'elect
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { UpdateManager } from './appUpdater.js';
 import { ModelDownloadManager, scanModelsDirectory } from './modelDownloader.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -16,6 +17,7 @@ const LOCAL_COMFY_FILTERS = [
 
 const modelDownloadManager = new ModelDownloadManager();
 let ipcRegistered = false;
+let updaterRegistered = false;
 
 /**
  * Configures Electron session headers so the packaged React UI (loaded via file://)
@@ -111,6 +113,61 @@ function registerModelManagerIpc() {
   });
 }
 
+function registerUpdaterIpc() {
+  if (updaterRegistered) return;
+  updaterRegistered = true;
+
+  const updateManager = new UpdateManager({
+    currentVersion: app.getVersion(),
+    tempDir: path.join(app.getPath('temp'), 'KinoFlowStudio-update'),
+  });
+
+  updateManager.subscribe((event) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.webContents.send('update:progress', event);
+      }
+    }
+  });
+
+  ipcMain.handle('update:version', async () => app.getVersion());
+
+  ipcMain.handle('update:check', async () => {
+    try {
+      return await updateManager.check();
+    } catch (error) {
+      return {
+        available: false,
+        currentVersion: app.getVersion(),
+        latestVersion: null,
+        error: String(error?.message ?? error),
+      };
+    }
+  });
+
+  ipcMain.handle('update:download', async () => {
+    try {
+      await updateManager.download();
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) };
+    }
+  });
+
+  ipcMain.handle('update:cancel', async () => updateManager.cancel());
+
+  ipcMain.handle('update:install', async () => {
+    try {
+      updateManager.install();
+      // Give the installer a moment to start, then close the app so files can be replaced.
+      setTimeout(() => app.quit(), 800);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) };
+    }
+  });
+}
+
 function resolveRendererEntry() {
   const rendererPath = path.join(__dirname, '..', 'build-renderer', 'index.html');
   if (fs.existsSync(rendererPath)) {
@@ -163,6 +220,7 @@ function createMainWindow() {
 app.whenReady().then(() => {
   configureLocalComfyAccess();
   registerModelManagerIpc();
+  registerUpdaterIpc();
   createMainWindow();
 
   app.on('activate', () => {

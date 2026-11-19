@@ -7,6 +7,7 @@ import { PreviewAndHistoryPanel } from './components/PreviewAndHistoryPanel';
 import { PromptWorkspace } from './components/PromptWorkspace';
 import { SettingsPanel } from './components/SettingsPanel';
 import { StartFramePanel } from './components/StartFramePanel';
+import { UpdateControl } from './components/UpdateControl';
 import { WorkflowInspectorView } from './components/WorkflowInspectorView';
 import {
   DEFAULT_NEGATIVE_PROMPT,
@@ -718,6 +719,7 @@ export default function App() {
 
           {/* Zone 3: Compact Auto-Routing status + Single primary CTA */}
           <div className="flex shrink-0 items-center gap-3">
+            <UpdateControl busy={isGenerating} />
             <span
               data-testid="auto-routing-status"
               className="hidden whitespace-nowrap font-mono text-[11px] text-[#94A3B8] xl:inline"
