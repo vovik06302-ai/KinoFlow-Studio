@@ -1,0 +1,326 @@
+{
+  "1": {
+    "class_type": "UnetLoaderGGUF",
+    "inputs": {
+      "unet_name": "{{I2V_HIGH_NOISE_MODEL}}"
+    },
+    "_meta": {
+      "title": "I2V Base Diffusion Model (High-Noise / Primary DiT)",
+      "comment": "СЮДА ПОДСТАВЛЯЕТСЯ I2V-модель для оживления стартового кадра и продолжения сцены (например, wan2.2_i2v_high_noise_14B_Q4_K_M.gguf)."
+    }
+  },
+  "2": {
+    "class_type": "UnetLoaderGGUF",
+    "inputs": {
+      "unet_name": "{{I2V_LOW_NOISE_MODEL}}"
+    },
+    "_meta": {
+      "title": "Wan 2.2 I2V Low-Noise MoE Expert",
+      "comment": "Второй эксперт I2V MoE для финальной детализации (удаляется для одноступенчатых моделей)."
+    }
+  },
+  "3": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "umt5-xxl-encoder-Q8_0.gguf",
+      "type": "wan",
+      "device": "cpu"
+    },
+    "_meta": {
+      "title": "Text Encoder UMT5-XXL (RAM Offload)",
+      "comment": "Выгружается в системную RAM (device: cpu) для экономии VRAM."
+    }
+  },
+  "4": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    },
+    "_meta": {
+      "title": "Video VAE Loader",
+      "comment": "Видео-VAE, используемый как для кодирования стартового кадра, так и для декодирования итогового видео."
+    }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "{{POSITIVE_PROMPT}}",
+      "clip": ["3", 0]
+    },
+    "_meta": {
+      "title": "Positive Prompt (Motion & Continuation Description)",
+      "comment": "СЮДА ПОДСТАВЛЯЕТСЯ фотореалистичное описание движения камеры и действий персонажей для данного сегмента."
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "{{NEGATIVE_PROMPT}}",
+      "clip": ["3", 0]
+    },
+    "_meta": {
+      "title": "Negative Prompt (Anti-CGI / Photorealism Guard)",
+      "comment": "СЮДА ПОДСТАВЛЯЕТСЯ строгий реалистичный Negative Prompt."
+    }
+  },
+  "7": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "{{START_FRAME_IMAGE}}"
+    },
+    "_meta": {
+      "title": "Start Frame Image (I2V / Chained Segment Anchor)",
+      "comment": "СЮДА ПОДСТАВЛЯЕТСЯ стартовый кадр (либо фото пользователя, либо автоматически извлечённый последний кадр предыдущего 5-секундного сегмента)."
+    }
+  },
+  "8": {
+    "class_type": "CLIPVisionEncode",
+    "inputs": {
+      "clip_vision": ["15", 0],
+      "image": ["7", 0],
+      "crop": "none"
+    },
+    "_meta": {
+      "title": "CLIP Vision Encode (Start Frame Conditioning)",
+      "comment": "Фиксирует свет, композицию и позу на стыке 5-секундных сегментов."
+    }
+  },
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "{{CHARACTER_1_IMAGE}}"
+    },
+    "_meta": {
+      "title": "Character Reference Photo #1 (Original Identity Anchor)",
+      "comment": "ЗАЩИТА ВНЕШНОСТИ: на каждый сегмент 10–30с и при «Продолжить сцену» сюда передаётся ОРИГИНАЛЬНОЕ исходное фото 1-го персонажа, чтобы лицо не размывалось к 30-й секунде."
+    }
+  },
+  "11": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "{{CHARACTER_2_IMAGE}}"
+    },
+    "_meta": {
+      "title": "Character Reference Photo #2 (Original Identity Anchor)",
+      "comment": "ЗАЩИТА ВНЕШНОСТИ: оригинальное исходное фото 2-го персонажа."
+    }
+  },
+  "12": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "{{CHARACTER_3_IMAGE}}"
+    },
+    "_meta": {
+      "title": "Character Reference Photo #3 (Original Identity Anchor)",
+      "comment": "ЗАЩИТА ВНЕШНОСТИ: оригинальное исходное фото 3-го персонажа."
+    }
+  },
+  "15": {
+    "class_type": "CLIPVisionLoader",
+    "inputs": {
+      "clip_name": "clip_vision_h.safetensors"
+    },
+    "_meta": {
+      "title": "CLIP Vision Encoder (Start Frame & Character Identity)",
+      "comment": "Используется одновременно для стартового кадра (нода 8) и для IP-Adapter / FaceID персонажей (ноды 20–22)."
+    }
+  },
+  "20": {
+    "class_type": "IPAdapterFaceID",
+    "inputs": {
+      "model": ["1", 0],
+      "clip_vision": ["15", 0],
+      "image": ["10", 0],
+      "character_name": "{{CHARACTER_1_NAME}}",
+      "weight": 0.8,
+      "weight_type": "linear",
+      "start_at": 0.0,
+      "end_at": 1.0
+    },
+    "_meta": {
+      "title": "IP-Adapter / FaceID Slot #1 (Identity Lock 0.75–0.85)",
+      "comment": "ЗАЩИТА ВНЕШНОСТИ: в длинных сценах (сегменты 2..6) и при продолжении сцены вес автоматически удерживается в диапазоне 0.75–0.85."
+    }
+  },
+  "21": {
+    "class_type": "IPAdapterFaceID",
+    "inputs": {
+      "model": ["20", 0],
+      "clip_vision": ["15", 0],
+      "image": ["11", 0],
+      "character_name": "{{CHARACTER_2_NAME}}",
+      "weight": 0.8,
+      "weight_type": "linear",
+      "start_at": 0.0,
+      "end_at": 1.0
+    },
+    "_meta": {
+      "title": "IP-Adapter / FaceID Slot #2 (Identity Lock 0.75–0.85)",
+      "comment": "ЗАЩИТА ВНЕШНОСТИ: имя персонажа #2 и фиксированный вес 0.75–0.85."
+    }
+  },
+  "22": {
+    "class_type": "IPAdapterFaceID",
+    "inputs": {
+      "model": ["21", 0],
+      "clip_vision": ["15", 0],
+      "image": ["12", 0],
+      "character_name": "{{CHARACTER_3_NAME}}",
+      "weight": 0.8,
+      "weight_type": "linear",
+      "start_at": 0.0,
+      "end_at": 1.0
+    },
+    "_meta": {
+      "title": "IP-Adapter / FaceID Slot #3 (Identity Lock 0.75–0.85)",
+      "comment": "ЗАЩИТА ВНЕШНОСТИ: имя персонажа #3 и фиксированный вес 0.75–0.85."
+    }
+  },
+  "30": {
+    "class_type": "WanImageToVideo",
+    "inputs": {
+      "positive": ["5", 0],
+      "negative": ["6", 0],
+      "vae": ["4", 0],
+      "clip_vision_output": ["8", 0],
+      "start_image": ["7", 0],
+      "width": 832,
+      "height": 480,
+      "length": 81,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "Image-to-Video Conditioning & Segment Latent",
+      "comment": "Объединяет стартовый кадр (#7), CLIP Vision (#8) и промпты в латент 5-секундного сегмента."
+    }
+  },
+  "40": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+      "model": ["22", 0],
+      "positive": ["30", 0],
+      "negative": ["30", 1],
+      "latent_image": ["30", 2],
+      "add_noise": "enable",
+      "noise_seed": 42,
+      "steps": 28,
+      "cfg": 4.0,
+      "sampler_name": "uni_pc",
+      "scheduler": "simple",
+      "start_at_step": 0,
+      "end_at_step": 10,
+      "return_with_leftover_noise": "enable"
+    },
+    "_meta": {
+      "title": "Stage 1 I2V Sampler (High-Noise Motion)",
+      "comment": "СЮДА ПОДСТАВЛЯЮТСЯ Seed (noise_seed с инкрементом на каждый сегмент) и steps."
+    }
+  },
+  "41": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+      "model": ["2", 0],
+      "positive": ["30", 0],
+      "negative": ["30", 1],
+      "latent_image": ["40", 0],
+      "add_noise": "disable",
+      "noise_seed": 42,
+      "steps": 28,
+      "cfg": 3.5,
+      "sampler_name": "uni_pc",
+      "scheduler": "simple",
+      "start_at_step": 10,
+      "end_at_step": 10000,
+      "return_with_leftover_noise": "disable"
+    },
+    "_meta": {
+      "title": "Stage 2 I2V Sampler (Low-Noise Fine Detail)",
+      "comment": "Вторая стадия I2V MoE-сэмплинга для Wan 2.2."
+    }
+  },
+  "50": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+      "samples": ["41", 0],
+      "vae": ["4", 0],
+      "tile_size": 256,
+      "overlap": 64,
+      "temporal_size": 64,
+      "temporal_overlap": 8
+    },
+    "_meta": {
+      "title": "Tiled Video VAE Decode",
+      "comment": "Тайловое декодирование латентов I2V сегмента перед постобработкой (апскейл/RIFE) или экспортом."
+    }
+  },
+  "55": {
+    "class_type": "UpscaleModelLoader",
+    "inputs": {
+      "model_name": "4x-UltraSharp.pth"
+    },
+    "_meta": {
+      "title": "Cinema Upscale Model Loader (1080p Post-Processing)",
+      "comment": "МЕСТО ПОДКЛЮЧЕНИЯ АПСКЕЙЛА: нейросетевой апскейл кадров до 1080p. Вырезается автоматически, если «Кино-апскейл до 1080p» выключен."
+    }
+  },
+  "56": {
+    "class_type": "ImageUpscaleWithModel",
+    "inputs": {
+      "upscale_model": ["55", 0],
+      "image": ["50", 0]
+    },
+    "_meta": {
+      "title": "Neural Cinema Upscale (Post-VAE)",
+      "comment": "МЕСТО ПОДКЛЮЧЕНИЯ АПСКЕЙЛА: повышает детализацию кожи, ткани и оптики на кадрах из VAEDecodeTiled (#50)."
+    }
+  },
+  "57": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": ["56", 0],
+      "upscale_method": "lanczos",
+      "width": 1920,
+      "height": 1080,
+      "crop": "disabled"
+    },
+    "_meta": {
+      "title": "Cinema 1080p Target Fit (Lanczos)",
+      "comment": "МЕСТО ПОДКЛЮЧЕНИЯ АПСКЕЙЛА: точный ресайз в 1080p (1920x1080 / 1080x1920 / 1080x1080)."
+    }
+  },
+  "58": {
+    "class_type": "RIFE VFI",
+    "inputs": {
+      "frames": ["57", 0],
+      "ckpt_name": "rife49.pth",
+      "clear_cache_after_n_frames": 10,
+      "multiplier": 2,
+      "fast_mode": true,
+      "ensemble": true,
+      "scale_factor": 1.0
+    },
+    "_meta": {
+      "title": "RIFE Frame Interpolation (24 / 30 FPS Smoothness)",
+      "comment": "МЕСТО ПОДКЛЮЧЕНИЯ RIFE: интерполяция кадров (ComfyUI-Frame-Interpolation) для плавности 24 или 30 FPS без дёрганости."
+    }
+  },
+  "60": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "images": ["58", 0],
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "kinoflow_i2v_seg",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 16,
+      "save_metadata": true,
+      "pingpong": false,
+      "save_output": true
+    },
+    "_meta": {
+      "title": "Export I2V MP4 Segment (VideoHelperSuite)",
+      "comment": "Вход images автоматически подключается к #58 (RIFE), #57 (1080p Upscale) или #50 (VAEDecodeTiled)."
+    }
+  }
+}

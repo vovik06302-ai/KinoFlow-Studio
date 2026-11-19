@@ -1,0 +1,372 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  AUTO_I2V_MODEL_FILE,
+  AUTO_T2V_MODEL_FILE,
+  DEFAULT_NEGATIVE_PROMPT,
+  buildWorkflowFromTemplate,
+  computeChainedCharacterWeight,
+  computeUpscaleTargetSize,
+  describeAutoRoutingStatus,
+  extractVideoOutputFromHistory,
+  formatSegmentLabel,
+  getViewUrl,
+  normalizeBaseUrl,
+  parseComfyWsEvent,
+  planGenerationSegments,
+  resolveAutoModelRoute,
+  secondsToAlignedFrames,
+  toWebSocketUrl,
+} from './comfyService';
+import type { GenerationSettings } from '../types/video';
+
+const baseSettings: GenerationSettings = {
+  serverUrl: 'http://127.0.0.1:8188',
+  comfyDir: 'C:\\ComfyUI_windows_portable\\ComfyUI',
+  mode: 't2v',
+  modelId: 'wan22-t2v-a14b-q4',
+  durationSec: 5,
+  fps: 16,
+  frames: 81,
+  resolutionId: '832x480',
+  width: 832,
+  height: 480,
+  steps: 28,
+  seed: 123456,
+  seedLocked: true,
+  upscale1080p: false,
+  rifeEnabled: false,
+  rifeTargetFps: 24,
+  shootingStyle: 'arri-35mm',
+};
+
+test('normalizeBaseUrl strips trailing slashes and ensures http scheme', () => {
+  assert.equal(normalizeBaseUrl('http://127.0.0.1:8188///'), 'http://127.0.0.1:8188');
+  assert.equal(normalizeBaseUrl('127.0.0.1:8188/'), 'http://127.0.0.1:8188');
+  assert.equal(normalizeBaseUrl(''), 'http://127.0.0.1:8188');
+});
+
+test('toWebSocketUrl converts http/https to ws/wss with clientId', () => {
+  assert.equal(
+    toWebSocketUrl('http://127.0.0.1:8188/', 'abc-1'),
+    'ws://127.0.0.1:8188/ws?clientId=abc-1',
+  );
+  assert.equal(
+    toWebSocketUrl('https://render.local:8188', 'abc-2'),
+    'wss://render.local:8188/ws?clientId=abc-2',
+  );
+});
+
+test('secondsToAlignedFrames aligns 5s segments at 16fps (81) and 24fps (121) to 4n + 1', () => {
+  const f16 = secondsToAlignedFrames(5, 16);
+  const f24 = secondsToAlignedFrames(5, 24);
+  assert.equal((f16 - 1) % 4, 0);
+  assert.equal(f16, 81);
+  assert.equal((f24 - 1) % 4, 0);
+  assert.equal(f24, 121);
+});
+
+test('planGenerationSegments chains 5s segments up to 30s (6 segments) and forces I2V for segments 2..6', () => {
+  const plan30T2V = planGenerationSegments(30, 't2v');
+  assert.equal(plan30T2V.length, 6);
+  assert.equal(plan30T2V[0].mode, 't2v');
+  assert.equal(plan30T2V[0].startSec, 0);
+  assert.equal(plan30T2V[0].endSec, 5);
+  assert.equal(plan30T2V[1].mode, 'i2v');
+  assert.equal(plan30T2V[1].startSec, 5);
+  assert.equal(plan30T2V[1].endSec, 10);
+  assert.equal(plan30T2V[5].mode, 'i2v');
+  assert.equal(plan30T2V[5].startSec, 25);
+  assert.equal(plan30T2V[5].endSec, 30);
+
+  const plan25I2V = planGenerationSegments(25, 'i2v');
+  assert.equal(plan25I2V.length, 5);
+  assert.equal(plan25I2V[0].mode, 'i2v');
+  assert.equal(plan25I2V[4].endSec, 25);
+
+  assert.equal(
+    formatSegmentLabel(4, 6, 15, 20),
+    'Рендер сегмента 4 из 6 (15–20 сек)...',
+  );
+});
+
+test('computeChainedCharacterWeight preserves user weight on segment 1 and locks [0.75, 0.85] on chained/continued segments', () => {
+  assert.equal(computeChainedCharacterWeight(0.55, 1, false), 0.55);
+  assert.equal(computeChainedCharacterWeight(0.95, 1, false), 0.95);
+  assert.equal(computeChainedCharacterWeight(0.4, 2, false), 0.75);
+  assert.equal(computeChainedCharacterWeight(0.95, 2, false), 0.85);
+  assert.equal(computeChainedCharacterWeight(0.8, 3, false), 0.8);
+  assert.equal(computeChainedCharacterWeight(0.5, 1, true), 0.75);
+  assert.equal(computeChainedCharacterWeight(1.0, 1, true), 0.85);
+});
+
+test('computeUpscaleTargetSize preserves orientation for 1080p cinema output', () => {
+  assert.deepEqual(computeUpscaleTargetSize(832, 480), { width: 1920, height: 1080 });
+  assert.deepEqual(computeUpscaleTargetSize(480, 832), { width: 1080, height: 1920 });
+  assert.deepEqual(computeUpscaleTargetSize(768, 768), { width: 1080, height: 1080 });
+});
+
+test('DEFAULT_NEGATIVE_PROMPT blocks 3D render, CGI, plastic skin, cartoon, anime, morphing, distorted hands, blurry', () => {
+  for (const term of [
+    '3D render',
+    'CGI',
+    'plastic skin',
+    'cartoon',
+    'anime',
+    'oversaturated',
+    'morphing',
+    'distorted hands',
+    'blurry',
+  ]) {
+    assert.ok(
+      DEFAULT_NEGATIVE_PROMPT.includes(term),
+      `DEFAULT_NEGATIVE_PROMPT should block "${term}"`,
+    );
+  }
+});
+
+test('buildWorkflowFromTemplate strips post-processing nodes 55-58 when disabled and links VHS_VideoCombine directly to VAEDecodeTiled', () => {
+  const graph = buildWorkflowFromTemplate({
+    settings: { ...baseSettings, mode: 't2v', fps: 24, frames: 121 },
+    positivePrompt: 'A slow dolly shot along a rainy street.',
+    negativePrompt: 'blurry, static',
+    characters: [],
+  });
+
+  assert.equal(graph['7'], undefined);
+  assert.equal(graph['10'], undefined);
+  assert.equal(graph['15'], undefined);
+  assert.equal(graph['20'], undefined);
+  assert.equal(graph['55'], undefined);
+  assert.equal(graph['56'], undefined);
+  assert.equal(graph['57'], undefined);
+  assert.equal(graph['58'], undefined);
+  assert.deepEqual(graph['40'].inputs.model, ['1', 0]);
+  assert.equal(graph['5'].inputs.text, 'A slow dolly shot along a rainy street.');
+  assert.equal(graph['30'].inputs.length, 121);
+  assert.deepEqual(graph['60'].inputs.images, ['50', 0]);
+  assert.equal(graph['60'].inputs.frame_rate, 24);
+  assert.ok(graph['41'], 'Wan 2.2 MoE should retain Stage 2 Low-Noise sampler');
+});
+
+test('buildWorkflowFromTemplate wires 1080p Upscale (#55-#57) and RIFE VFI (#58) into VHS_VideoCombine (#60)', () => {
+  const graph = buildWorkflowFromTemplate({
+    settings: {
+      ...baseSettings,
+      mode: 't2v',
+      width: 832,
+      height: 480,
+      fps: 16,
+      upscale1080p: true,
+      rifeEnabled: true,
+      rifeTargetFps: 30,
+    },
+    positivePrompt: 'Live-action 35mm street scene.',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    characters: [],
+  });
+
+  assert.equal(graph['55'].class_type, 'UpscaleModelLoader');
+  assert.equal(graph['56'].class_type, 'ImageUpscaleWithModel');
+  assert.deepEqual(graph['56'].inputs.image, ['50', 0]);
+  assert.equal(graph['57'].class_type, 'ImageScale');
+  assert.equal(graph['57'].inputs.width, 1920);
+  assert.equal(graph['57'].inputs.height, 1080);
+  assert.equal(graph['58'].class_type, 'RIFE VFI');
+  assert.deepEqual(graph['58'].inputs.frames, ['57', 0]);
+  assert.deepEqual(graph['60'].inputs.images, ['58', 0]);
+  assert.equal(graph['60'].inputs.frame_rate, 30);
+});
+
+test('buildWorkflowFromTemplate I2V chains original character references with locked 0.75-0.85 weight on segment >= 2', () => {
+  const graph = buildWorkflowFromTemplate({
+    settings: { ...baseSettings, mode: 'i2v', fps: 16 },
+    positivePrompt: 'Marina turns toward the harbor lights as rain falls.',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    startFrameFilename: 'kinoflow_chain/seg1_last_frame.png',
+    segmentIndex: 2,
+    characters: [
+      { name: 'Марина', weight: 0.45, imageFilename: 'kinoflow_refs/marina.png' },
+      { name: 'Владимир', weight: 0.98, imageFilename: 'kinoflow_refs/vladimir.png' },
+    ],
+  });
+
+  assert.equal(graph['1'].inputs.unet_name, 'wan2.2_i2v_high_noise_14B_Q4_K_M.gguf');
+  assert.equal(graph['2'].inputs.unet_name, 'wan2.2_i2v_low_noise_14B_Q4_K_M.gguf');
+  assert.equal(graph['7'].class_type, 'LoadImage');
+  assert.equal(graph['7'].inputs.image, 'kinoflow_chain/seg1_last_frame.png');
+  assert.equal(graph['30'].class_type, 'WanImageToVideo');
+  assert.deepEqual(graph['30'].inputs.start_image, ['7', 0]);
+  assert.ok(graph['15'], 'CLIPVisionLoader must stay present for I2V start frame conditioning');
+  assert.equal(graph['10'].inputs.image, 'kinoflow_refs/marina.png');
+  assert.equal(graph['20'].inputs.weight, 0.75);
+  assert.equal(graph['11'].inputs.image, 'kinoflow_refs/vladimir.png');
+  assert.equal(graph['21'].inputs.weight, 0.85);
+  assert.deepEqual(graph['40'].inputs.model, ['21', 0]);
+});
+
+test('buildWorkflowFromTemplate switches to single-stage sampler for CogVideoX I2V', () => {
+  const graph = buildWorkflowFromTemplate({
+    settings: { ...baseSettings, mode: 'i2v', modelId: 'cogvideox-15-5b-fp8', steps: 30 },
+    positivePrompt: 'Ocean waves crashing on dark cliffs',
+    negativePrompt: 'blurry',
+    startFrameFilename: 'kinoflow_start/cliff.png',
+    characters: [],
+  });
+
+  assert.equal(graph['1'].inputs.unet_name, 'cogvideox_1_5_5b_i2v_fp8_e4m3fn.safetensors');
+  assert.equal(graph['2'], undefined);
+  assert.equal(graph['41'], undefined);
+  assert.ok(graph['15'], 'CLIPVisionLoader stays present in I2V even without characters');
+  assert.deepEqual(graph['50'].inputs.samples, ['40', 0]);
+  assert.equal(graph['40'].inputs.end_at_step, 30);
+});
+
+test('extractVideoOutputFromHistory parses VHS_VideoCombine gifs/mp4 output and builds /view URL', () => {
+  const history = {
+    'pid-42': {
+      outputs: {
+        '60': {
+          gifs: [
+            {
+              filename: 'kinoflow_video_00001.mp4',
+              subfolder: 'renders',
+              type: 'output',
+            },
+          ],
+        },
+      },
+    },
+  };
+
+  const out = extractVideoOutputFromHistory(history, 'pid-42', 'http://127.0.0.1:8188/');
+  assert.ok(out);
+  assert.equal(out.filename, 'kinoflow_video_00001.mp4');
+  assert.equal(
+    out.viewUrl,
+    getViewUrl('http://127.0.0.1:8188', 'kinoflow_video_00001.mp4', 'renders', 'output'),
+  );
+});
+
+test('parseComfyWsEvent decodes progress and execution completion events', () => {
+  const p = parseComfyWsEvent(
+    JSON.stringify({
+      type: 'progress',
+      data: { prompt_id: 'p1', node: '40', value: 7, max: 28 },
+    }),
+    'p1',
+  );
+  assert.equal(p.type, 'progress');
+  assert.equal(p.value, 7);
+  assert.equal(p.max, 28);
+
+  const done = parseComfyWsEvent(
+    JSON.stringify({
+      type: 'executing',
+      data: { prompt_id: 'p1', node: null },
+    }),
+    'p1',
+  );
+  assert.equal(done.type, 'executing');
+  assert.equal(done.nodeId, null);
+});
+
+test('resolveAutoModelRoute selects T2V FP8 for fresh text-to-video and I2V FP8 for start frame, Extend Scene, and chained segments 2..6', () => {
+  const t2vRoute = resolveAutoModelRoute({
+    modelId: 'auto',
+    mode: 't2v',
+    segmentIndex: 1,
+    hasStartFrame: false,
+    isContinuation: false,
+  });
+  assert.equal(t2vRoute.workflowFile, 'workflow_t2v.json');
+  assert.equal(t2vRoute.highNoiseModelFile, AUTO_T2V_MODEL_FILE);
+
+  const i2vStartRoute = resolveAutoModelRoute({
+    modelId: 'auto',
+    mode: 'i2v',
+    segmentIndex: 1,
+    hasStartFrame: true,
+    isContinuation: false,
+  });
+  assert.equal(i2vStartRoute.workflowFile, 'workflow_i2v.json');
+  assert.equal(i2vStartRoute.highNoiseModelFile, AUTO_I2V_MODEL_FILE);
+
+  const extendRoute = resolveAutoModelRoute({
+    modelId: 'auto',
+    mode: 't2v',
+    segmentIndex: 1,
+    hasStartFrame: false,
+    isContinuation: true,
+  });
+  assert.equal(extendRoute.workflowFile, 'workflow_i2v.json');
+  assert.equal(extendRoute.highNoiseModelFile, AUTO_I2V_MODEL_FILE);
+
+  const chainedRoute = resolveAutoModelRoute({
+    modelId: 'auto',
+    mode: 't2v',
+    segmentIndex: 2,
+    hasStartFrame: true,
+    isContinuation: false,
+  });
+  assert.equal(chainedRoute.workflowFile, 'workflow_i2v.json');
+  assert.equal(chainedRoute.highNoiseModelFile, AUTO_I2V_MODEL_FILE);
+});
+
+test('buildWorkflowFromTemplate in auto mode injects wan2.2_t2v_14B_fp8_e4m3fn for T2V and wan2.2_i2v_14B_fp8_e4m3fn for I2V / chained segments', () => {
+  const t2vGraph = buildWorkflowFromTemplate({
+    settings: { ...baseSettings, modelId: 'auto', mode: 't2v' },
+    positivePrompt: 'A slow camera push through misty woods.',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    characters: [],
+    segmentIndex: 1,
+  });
+  assert.equal(t2vGraph['1'].inputs.unet_name, 'wan2.2_t2v_14B_fp8_e4m3fn.safetensors');
+  assert.equal(t2vGraph['7'], undefined);
+  assert.equal(t2vGraph['41'], undefined);
+
+  const i2vGraph = buildWorkflowFromTemplate({
+    settings: { ...baseSettings, modelId: 'auto', mode: 't2v' },
+    positivePrompt: 'Continuation segment 2.',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    startFrameFilename: 'kinoflow_chain/seg1_last_frame.png',
+    characters: [],
+    segmentIndex: 2,
+  });
+  assert.equal(i2vGraph['1'].inputs.unet_name, 'wan2.2_i2v_14B_fp8_e4m3fn.safetensors');
+  assert.equal(i2vGraph['7'].inputs.image, 'kinoflow_chain/seg1_last_frame.png');
+  assert.equal(i2vGraph['30'].class_type, 'WanImageToVideo');
+});
+
+test('describeAutoRoutingStatus reports concise Russian status for T2V, chained T2V+I2V, I2V, and Extend Scene', () => {
+  assert.equal(
+    describeAutoRoutingStatus({
+      modelId: 'auto',
+      mode: 't2v',
+      durationSec: 15,
+      hasStartFrame: false,
+      isExtending: false,
+    }),
+    'Режим: Авто → Старт с нуля (T2V) + продолжение (I2V)',
+  );
+  assert.equal(
+    describeAutoRoutingStatus({
+      modelId: 'auto',
+      mode: 'i2v',
+      durationSec: 5,
+      hasStartFrame: true,
+      isExtending: false,
+    }),
+    'Режим: Авто → Оживление фото (I2V)',
+  );
+  assert.equal(
+    describeAutoRoutingStatus({
+      modelId: 'auto',
+      mode: 'i2v',
+      durationSec: 10,
+      hasStartFrame: true,
+      isExtending: true,
+    }),
+    'Режим: Авто → Продолжение сцены (I2V)',
+  );
+});

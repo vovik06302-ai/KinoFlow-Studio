@@ -1,0 +1,6 @@
+{
+  "name": "KinoFlow Studio",
+  "description": "Веб-интерфейс для локальной генерации видео по тексту и референсным фотографиям персонажей через API ComfyUI (Wan 2.2, CogVideoX) с улучшением промптов на базе Gemini API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

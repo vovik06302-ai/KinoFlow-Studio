@@ -1,0 +1,145 @@
+/**
+ * Official required models catalog for photorealistic Wan 2.2 T2V / I2V generation in ComfyUI.
+ * Direct download URLs and exact byte sizes are verified against official Comfy-Org Hugging Face repositories.
+ */
+
+export const DEFAULT_COMFY_DIR = 'C:\\ComfyUI_windows_portable\\ComfyUI';
+
+export const REQUIRED_MODELS = [
+  {
+    id: 'wan22-t2v-high-fp8',
+    name: 'Wan 2.2 T2V 14B FP8 (High-Noise)',
+    category: 'Diffusion · T2V',
+    description: 'Основной эксперт структуры и движения для генерации видео по тексту (FP8 Scaled).',
+    filename: 'wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors',
+    targetSubfolder: 'models/diffusion_models',
+    repoId: 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+    downloadUrl:
+      'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors',
+    expectedSizeBytes: 14293923632,
+  },
+  {
+    id: 'wan22-t2v-low-fp8',
+    name: 'Wan 2.2 T2V 14B FP8 (Low-Noise)',
+    category: 'Diffusion · T2V',
+    description: 'Второй эксперт мелкой детализации кожи, света и текстур для Text-to-Video (FP8 Scaled).',
+    filename: 'wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors',
+    targetSubfolder: 'models/diffusion_models',
+    repoId: 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+    downloadUrl:
+      'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors',
+    expectedSizeBytes: 14293923632,
+  },
+  {
+    id: 'wan22-i2v-high-fp8',
+    name: 'Wan 2.2 I2V 14B FP8 (High-Noise)',
+    category: 'Diffusion · I2V',
+    description: 'Эксперт анимации стартового кадра и продолжения длинных сцен до 30+ сек (FP8 Scaled).',
+    filename: 'wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors',
+    targetSubfolder: 'models/diffusion_models',
+    repoId: 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+    downloadUrl:
+      'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors',
+    expectedSizeBytes: 14294742832,
+  },
+  {
+    id: 'wan22-i2v-low-fp8',
+    name: 'Wan 2.2 I2V 14B FP8 (Low-Noise)',
+    category: 'Diffusion · I2V',
+    description: 'Второй эксперт фотореалистичной прорисовки в режиме «Оживление фото» и цепочках I2V.',
+    filename: 'wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors',
+    targetSubfolder: 'models/diffusion_models',
+    repoId: 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+    downloadUrl:
+      'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors',
+    expectedSizeBytes: 14294742832,
+  },
+  {
+    id: 'umt5-xxl-fp8',
+    name: 'Текстовый энкодер UMT5-XXL FP8',
+    category: 'Text Encoder',
+    description: 'Точное следование сложным кинематографичным промптам (выгружается в RAM на CPU).',
+    filename: 'umt5_xxl_fp8_e4m3fn_scaled.safetensors',
+    targetSubfolder: 'models/text_encoders',
+    repoId: 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+    downloadUrl:
+      'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors',
+    expectedSizeBytes: 6735906897,
+  },
+  {
+    id: 'wan-21-vae',
+    name: 'Video VAE (wan_2.1_vae)',
+    category: 'VAE',
+    description: 'Официальный пространственно-временной VAE декодер для моделей Wan 2.2 14B.',
+    filename: 'wan_2.1_vae.safetensors',
+    targetSubfolder: 'models/vae',
+    repoId: 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+    downloadUrl:
+      'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors',
+    expectedSizeBytes: 253815318,
+  },
+  {
+    id: 'clip-vision-h',
+    name: 'CLIP Vision H (clip_vision_h)',
+    category: 'CLIP Vision',
+    description: 'Энкодер референсных лиц персонажей (IP-Adapter / FaceID) и стартового кадра I2V.',
+    filename: 'clip_vision_h.safetensors',
+    targetSubfolder: 'models/clip_vision',
+    repoId: 'Comfy-Org/Wan_2.1_ComfyUI_repackaged',
+    downloadUrl:
+      'https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors',
+    expectedSizeBytes: 1264219396,
+  },
+];
+
+/**
+ * Evaluates installation status from disk stats of the target file and any resumable .part file.
+ */
+export function evaluateModelFileStatus(
+  expectedSizeBytes,
+  existingSizeBytes,
+  partialSizeBytes = 0,
+) {
+  if (typeof existingSizeBytes === 'number' && existingSizeBytes >= 0) {
+    if (existingSizeBytes === expectedSizeBytes) {
+      return 'installed';
+    }
+    return 'size_mismatch';
+  }
+  if (typeof partialSizeBytes === 'number' && partialSizeBytes > 0) {
+    return 'partial';
+  }
+  return 'missing';
+}
+
+export function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 Б';
+  const units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
+  const exp = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / 1024 ** exp;
+  const decimals = exp >= 3 ? 2 : exp === 2 ? 1 : 0;
+  return `${value.toFixed(decimals)} ${units[exp]}`;
+}
+
+export function formatSpeed(bytesPerSec) {
+  if (!Number.isFinite(bytesPerSec) || bytesPerSec <= 0) return '0 МБ/с';
+  if (bytesPerSec >= 1024 * 1024) {
+    return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} МБ/с`;
+  }
+  return `${Math.round(bytesPerSec / 1024)} КБ/с`;
+}
+
+export function formatEta(etaSeconds) {
+  if (!Number.isFinite(etaSeconds) || etaSeconds < 0) return 'расчёт...';
+  if (etaSeconds < 60) {
+    return `${Math.max(1, Math.round(etaSeconds))} сек`;
+  }
+  const totalMin = Math.floor(etaSeconds / 60);
+  const remSec = Math.round(etaSeconds % 60);
+  if (totalMin < 60) {
+    return `${totalMin} мин ${remSec} сек`;
+  }
+  const hours = Math.floor(totalMin / 60);
+  const remMin = totalMin % 60;
+  return `${hours} ч ${remMin} мин`;
+}
