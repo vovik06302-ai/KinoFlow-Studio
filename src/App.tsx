@@ -7,6 +7,9 @@ import { PreviewAndHistoryPanel } from './components/PreviewAndHistoryPanel';
 import { PromptWorkspace } from './components/PromptWorkspace';
 import { SettingsPanel } from './components/SettingsPanel';
 import { StartFramePanel } from './components/StartFramePanel';
+import { ComfyLauncherPanel } from './components/ComfyLauncherPanel';
+import { ScenePresetBar } from './components/ScenePresetBar';
+import { StoryboardPanel } from './components/StoryboardPanel';
 import { UpdateControl } from './components/UpdateControl';
 import { WorkflowInspectorView } from './components/WorkflowInspectorView';
 import {
@@ -17,6 +20,7 @@ import {
   SEGMENT_DURATION_SEC,
   SHOOTING_STYLES,
   checkConnection,
+  computeOutputFps,
   describeAutoRoutingStatus,
   getModelOption,
   getShootingStyleOption,
@@ -31,6 +35,12 @@ import {
   saveSettings,
 } from './services/historyStorage';
 import { DEFAULT_COMFY_DIR } from './services/modelManagerService';
+import { PreflightError } from './services/preflightService';
+import { exportScenePreset } from './services/scenePreset';
+import type { ScenePreset } from './services/scenePreset';
+import { countStoryboardSegments, resizeStoryboard } from './services/storyboard';
+import type { CameraPresetId, StoryboardShot } from './services/storyboard';
+import type { PreflightReport } from './services/preflightService';
 import { enhanceScenePrompt } from './services/promptService';
 import { extractLastFrameFromVideo } from './utils/videoFrameUtils';
 import type {
@@ -132,11 +142,15 @@ export default function App() {
     null,
   );
   const [negativePrompt, setNegativePrompt] = useState(DEFAULT_NEGATIVE_PROMPT);
+  const [cameraPreset, setCameraPreset] = useState<CameraPresetId>('none');
+  const [storyboardEnabled, setStoryboardEnabled] = useState(false);
+  const [storyboardShots, setStoryboardShots] = useState<StoryboardShot[]>([]);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [enhanceError, setEnhanceError] = useState<string | null>(null);
 
   const [progress, setProgress] = useState<GenerationProgress>(IDLE_PROGRESS);
   const [generationError, setGenerationError] = useState<string | null>(null);
+  const [preflightReport, setPreflightReport] = useState<PreflightReport | null>(null);
   const [isExtending, setIsExtending] = useState(false);
   const [extendError, setExtendError] = useState<string | null>(null);
   const [extendingSourceVideo, setExtendingSourceVideo] = useState<GenerationHistoryItem | null>(
@@ -341,7 +355,7 @@ export default function App() {
         height: settings.height,
         durationSec: 5,
         fps: settings.fps,
-        outputFps: settings.rifeEnabled ? settings.rifeTargetFps : settings.fps,
+        outputFps: computeOutputFps(settings.fps, settings.rifeEnabled),
         upscale1080p: settings.upscale1080p,
         rifeEnabled: settings.rifeEnabled,
         rifeTargetFps: settings.rifeTargetFps,
@@ -446,6 +460,7 @@ export default function App() {
     abortControllerRef.current = controller;
 
     setGenerationError(null);
+    setPreflightReport(null);
     setProgress({
       phase: 'uploading',
       percent: 4,
@@ -474,6 +489,11 @@ export default function App() {
         positivePrompt: activePrompt,
         negativePrompt,
         characters,
+        storyboard:
+          storyboardEnabled && runSettings.durationSec >= 10
+            ? resizeStoryboard(storyboardShots, countStoryboardSegments(runSettings.durationSec))
+            : undefined,
+        defaultCamera: cameraPreset,
         startFrame,
         isContinuation: Boolean(extendingSourceVideo),
         fallbackCharacterAnchors,
@@ -531,7 +551,7 @@ export default function App() {
         height: runSettings.height,
         durationSec: totalDurationSec,
         fps: runSettings.fps,
-        outputFps: runSettings.rifeEnabled ? runSettings.rifeTargetFps : runSettings.fps,
+        outputFps: computeOutputFps(runSettings.fps, runSettings.rifeEnabled),
         upscale1080p: runSettings.upscale1080p,
         rifeEnabled: runSettings.rifeEnabled,
         rifeTargetFps: runSettings.rifeTargetFps,
@@ -575,7 +595,10 @@ export default function App() {
         percent: 0,
         message: isCancelled ? 'Генерация отменена' : '',
       });
-      if (!isCancelled) {
+      if (!isCancelled && err instanceof PreflightError) {
+        setPreflightReport(err.report);
+        setGenerationError('Проверка перед запуском нашла, чего не хватает в ComfyUI.');
+      } else if (!isCancelled) {
         setGenerationError(
           `${msg} Проверьте, что ComfyUI запущен на ${runSettings.serverUrl} с флагом --enable-cors-header "*".`,
         );
@@ -592,11 +615,54 @@ export default function App() {
     startFrame,
     originalPromptBeforeEnhance,
     extendingSourceVideo,
+    storyboardEnabled,
+    storyboardShots,
+    cameraPreset,
   ]);
 
   const handleCancelGeneration = useCallback(() => {
     abortControllerRef.current?.abort();
   }, []);
+
+  const handleExportScenePreset = useCallback(
+    () =>
+      exportScenePreset({
+        prompt,
+        negativePrompt,
+        cameraPreset,
+        storyboardEnabled,
+        storyboardShots,
+        settings,
+      }),
+    [prompt, negativePrompt, cameraPreset, storyboardEnabled, storyboardShots, settings],
+  );
+
+  const handleImportScenePreset = useCallback(
+    (preset: ScenePreset) => {
+      handlePromptChange(preset.prompt);
+      setOriginalPromptBeforeEnhance(null);
+      setNegativePrompt(preset.negativePrompt || DEFAULT_NEGATIVE_PROMPT);
+      setCameraPreset(preset.cameraPreset);
+      setStoryboardEnabled(preset.storyboardEnabled);
+      setStoryboardShots(preset.storyboardShots);
+      handleSettingsChange(preset.settings);
+    },
+    [handlePromptChange, handleSettingsChange],
+  );
+
+  // Ctrl+Enter starts a generation from anywhere in the studio.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+        if (activeTab === 'studio' && !isGenerating) {
+          event.preventDefault();
+          void handleGenerate();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [activeTab, isGenerating, handleGenerate]);
 
   const handleRestoreHistoryItem = useCallback((item: GenerationHistoryItem) => {
     const validDuration: DurationChoice = DURATION_CHOICES.includes(
@@ -869,6 +935,13 @@ export default function App() {
                   onRandomizeSeed={() => handleSettingsChange({ seed: randomSeed() })}
                 />
 
+                <ComfyLauncherPanel
+                  comfyDir={settings.comfyDir}
+                  connectionStatus={connection.status}
+                  disabled={isGenerating}
+                  onCheckConnection={() => void handleCheckConnection()}
+                />
+
                 {settings.mode === 'i2v' && (
                   <StartFramePanel
                     startFrame={startFrame}
@@ -900,6 +973,23 @@ export default function App() {
                   onEnhancePrompt={() => void handleEnhancePrompt()}
                   onRevertEnhancedPrompt={handleRevertEnhancedPrompt}
                 />
+
+                <StoryboardPanel
+                  durationSec={settings.durationSec}
+                  camera={cameraPreset}
+                  storyboardEnabled={storyboardEnabled}
+                  shots={storyboardShots}
+                  disabled={isGenerating}
+                  onCameraChange={setCameraPreset}
+                  onStoryboardEnabledChange={setStoryboardEnabled}
+                  onShotsChange={setStoryboardShots}
+                />
+
+                <ScenePresetBar
+                  disabled={isGenerating}
+                  onExport={handleExportScenePreset}
+                  onImport={handleImportScenePreset}
+                />
               </div>
 
               {/* Right Preview & History Stage */}
@@ -907,6 +997,8 @@ export default function App() {
                 <PreviewAndHistoryPanel
                   progress={progress}
                   generationError={generationError}
+                  preflightReport={preflightReport}
+                  onOpenModels={() => setActiveTab('models')}
                   activeVideo={activeVideo}
                   history={history}
                   isGenerating={isGenerating}

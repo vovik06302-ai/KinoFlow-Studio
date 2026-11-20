@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { UpdateManager } from './appUpdater.js';
 import { ModelDownloadManager, scanModelsDirectory } from './modelDownloader.js';
 import { performComfyRequest, probeLocalComfyUrls } from './comfyBridge.js';
+import { ComfyLauncher, findLaunchScript } from './comfyLauncher.js';
+import { findFfmpeg, isHttpUrl, mergeSegments } from './filmMerger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -149,6 +151,96 @@ function registerModelManagerIpc() {
   });
 }
 
+let launcherIpcRegistered = false;
+const comfyLauncher = new ComfyLauncher();
+
+function registerLauncherIpc() {
+  if (launcherIpcRegistered) return;
+  launcherIpcRegistered = true;
+
+  comfyLauncher.subscribe((event) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('comfy:launcher-event', event);
+    }
+  });
+
+  ipcMain.handle('comfy:launcher-state', async () => comfyLauncher.getState());
+
+  ipcMain.handle('comfy:launcher-start', async (_event, comfyDir) => {
+    const scriptPath = findLaunchScript(typeof comfyDir === 'string' ? comfyDir : '');
+    return comfyLauncher.start(scriptPath);
+  });
+
+  ipcMain.handle('comfy:launcher-stop', async () => comfyLauncher.stop());
+
+  // Do not leave an orphaned ComfyUI running when the app is closed after starting it from here.
+  app.on('before-quit', () => {
+    comfyLauncher.stop();
+  });
+}
+
+let filmIpcRegistered = false;
+
+function registerFilmIpc() {
+  if (filmIpcRegistered) return;
+  filmIpcRegistered = true;
+
+  ipcMain.handle('film:check-ffmpeg', async () => ({ ffmpegPath: await findFfmpeg() }));
+
+  ipcMain.handle('film:merge', async (event, payload) => {
+    const segmentUrls = Array.isArray(payload?.segmentUrls) ? payload.segmentUrls : [];
+    if (segmentUrls.length === 0 || segmentUrls.length > 24 || !segmentUrls.every(isHttpUrl)) {
+      return { ok: false, error: 'Некорректный список сегментов для склейки.' };
+    }
+
+    const ffmpegPath = await findFfmpeg();
+    if (!ffmpegPath) {
+      return {
+        ok: false,
+        code: 'FFMPEG_NOT_FOUND',
+        error:
+          'FFmpeg не найден. Установите FFmpeg и добавьте его в PATH (или положите ffmpeg.exe в C:\\ffmpeg\\bin).',
+      };
+    }
+
+    const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getAllWindows()[0];
+    const suggestedName =
+      typeof payload?.suggestedName === 'string' && payload.suggestedName.trim()
+        ? path.basename(payload.suggestedName.trim())
+        : 'kinoflow_film.mp4';
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      title: 'Сохранить фильм',
+      defaultPath: path.join(app.getPath('videos'), suggestedName),
+      filters: [{ name: 'MP4', extensions: ['mp4'] }],
+    });
+    if (canceled || !filePath) {
+      return { ok: false, code: 'CANCELLED' };
+    }
+
+    try {
+      await mergeSegments({
+        segmentUrls,
+        outputPath: filePath,
+        ffmpegPath,
+        tempRoot: app.getPath('temp'),
+        onProgress: (progress) => {
+          if (!win.isDestroyed()) win.webContents.send('film:progress', progress);
+        },
+      });
+      return { ok: true, path: filePath };
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) };
+    }
+  });
+
+  ipcMain.handle('film:show-file', async (_event, filePath) => {
+    if (typeof filePath === 'string' && filePath) {
+      shell.showItemInFolder(filePath);
+    }
+    return { ok: true };
+  });
+}
+
 function registerUpdaterIpc() {
   if (updaterRegistered) return;
   updaterRegistered = true;
@@ -221,6 +313,7 @@ function createMainWindow() {
     minWidth: 960,
     minHeight: 640,
     title: 'KinoFlow Studio',
+    icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
     backgroundColor: '#0B0D11',
     autoHideMenuBar: true,
     show: false,
@@ -257,6 +350,8 @@ app.whenReady().then(() => {
   configureLocalComfyAccess();
   registerModelManagerIpc();
   registerUpdaterIpc();
+  registerFilmIpc();
+  registerLauncherIpc();
   createMainWindow();
 
   app.on('activate', () => {

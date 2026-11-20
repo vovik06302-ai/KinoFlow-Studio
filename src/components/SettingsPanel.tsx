@@ -5,7 +5,6 @@ import {
   DURATION_CHOICES,
   FPS_CHOICES,
   RESOLUTION_PRESETS,
-  RIFE_FPS_CHOICES,
   SEGMENT_DURATION_SEC,
   SHOOTING_STYLES,
   VIDEO_MODELS,
@@ -21,7 +20,6 @@ import type {
   DurationChoice,
   FpsChoice,
   GenerationSettings,
-  RifeTargetFps,
   ShootingStyleId,
 } from '../types/video';
 
@@ -419,7 +417,7 @@ export function SettingsPanel({
               ? `${upscaleTarget.width}×${upscaleTarget.height}`
               : `${settings.width}×${settings.height}`}
             {' · '}
-            {settings.rifeEnabled ? `${settings.rifeTargetFps} fps RIFE` : `${settings.fps} fps`}
+            {settings.rifeEnabled ? `${settings.fps * 2} fps RIFE` : `${settings.fps} fps`}
           </span>
         </div>
 
@@ -478,7 +476,7 @@ export function SettingsPanel({
             >
               <div className="min-w-0">
                 <span className="block text-xs font-medium text-[#E2E8F0]">
-                  Плавность 24 / 30 FPS (RIFE)
+                  Плавность ×2 (RIFE)
                 </span>
                 <span className="mt-0.5 block font-mono text-[11px] text-[#64748B]">
                   Узел #58 · интерполяция кадров RIFE VFI без дёрганости
@@ -495,34 +493,10 @@ export function SettingsPanel({
             </label>
 
             {settings.rifeEnabled && (
-              <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-[#1E2330] pt-2.5">
-                <span className="text-[11px] text-[#94A3B8]">Целевая частота RIFE</span>
-                <div
-                  role="group"
-                  aria-label="Целевая частота кадров RIFE"
-                  className="grid grid-cols-2 gap-1 rounded-md border border-[#262C3A] bg-[#0D1017] p-0.5"
-                >
-                  {RIFE_FPS_CHOICES.map((targetFps: RifeTargetFps) => {
-                    const isSelected = settings.rifeTargetFps === targetFps;
-                    return (
-                      <button
-                        key={targetFps}
-                        type="button"
-                        disabled={disabled}
-                        aria-pressed={isSelected}
-                        onClick={() => onChange({ rifeTargetFps: targetFps })}
-                        className={`whitespace-nowrap rounded px-2.5 py-1 font-mono text-[11px] font-medium tabular-nums transition-colors ${
-                          isSelected
-                            ? 'bg-[#E58E26] text-[#0B0D11]'
-                            : 'text-[#94A3B8] hover:text-[#F1F5F9]'
-                        }`}
-                      >
-                        {targetFps} fps
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+              <p className="mt-2.5 border-t border-[#1E2330] pt-2.5 text-[11px] text-[#94A3B8]">
+                Кадров вдвое больше, поэтому частота на выходе {settings.fps * 2} fps. Длительность
+                ролика не меняется.
+              </p>
             )}
           </div>
         </div>

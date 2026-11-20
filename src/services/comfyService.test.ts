@@ -9,7 +9,9 @@ import {
   buildWorkflowFromTemplate,
   classifyConnectionError,
   computeChainedCharacterWeight,
+  computeOutputFps,
   computeUpscaleTargetSize,
+  createComfyFetch,
   describeAutoRoutingStatus,
   extractVideoOutputFromHistory,
   formatSegmentLabel,
@@ -176,9 +178,10 @@ test('buildWorkflowFromTemplate wires 1080p Upscale (#55-#57) and RIFE VFI (#58)
   assert.equal(graph['57'].inputs.width, 1920);
   assert.equal(graph['57'].inputs.height, 1080);
   assert.equal(graph['58'].class_type, 'RIFE VFI');
+  assert.equal(graph['58'].inputs.multiplier, 2);
   assert.deepEqual(graph['58'].inputs.frames, ['57', 0]);
   assert.deepEqual(graph['60'].inputs.images, ['58', 0]);
-  assert.equal(graph['60'].inputs.frame_rate, 30);
+  assert.equal(graph['60'].inputs.frame_rate, 32, 'RIFE x2 on 16 fps must play at 32 fps, not slow-mo');
 });
 
 test('buildWorkflowFromTemplate I2V graph has no IP-Adapter nodes and every link points to an existing node', () => {
@@ -389,6 +392,14 @@ test('describeAutoRoutingStatus reports concise Russian status for T2V, chained 
   );
 });
 
+test('computeOutputFps keeps playback speed: RIFE doubles the frame rate', () => {
+  assert.equal(computeOutputFps(16, true), 32);
+  assert.equal(computeOutputFps(24, true), 48);
+  assert.equal(computeOutputFps(16, false), 16);
+  // 81 frames @16fps = 5.06 s; after RIFE x2 (161 frames) @32fps stays 5.03 s
+  assert.ok(Math.abs(161 / computeOutputFps(16, true) - 81 / 16) < 0.05);
+});
+
 test('classifyConnectionError distinguishes Electron ECONNREFUSED, HTTPS Mixed Content, timeouts, and browser CORS', () => {
   const electronRefused = classifyConnectionError({
     serverUrl: 'http://127.0.0.1:8188',
@@ -420,4 +431,29 @@ test('classifyConnectionError distinguishes Electron ECONNREFUSED, HTTPS Mixed C
   });
   assert.match(localHttpMsg, /--enable-cors-header/);
   assert.match(localHttpMsg, /8000/);
+});
+
+test('createComfyFetch routes GET requests through the Electron bridge and maps network errors to TypeError', async () => {
+  const calls: Array<{ url: string; method?: string }> = [];
+  (globalThis as unknown as { window: unknown }).window = {
+    kinoflowComfy: {
+      request: async (options: { url: string; method?: string }) => {
+        calls.push(options);
+        if (options.url.includes('broken')) {
+          return { ok: false, status: 0, statusText: '', bodyText: '', networkError: true, errorCode: 'ECONNREFUSED' };
+        }
+        return { ok: true, status: 200, statusText: 'OK', bodyText: '{"a":1}' };
+      },
+    },
+  };
+  try {
+    const comfyFetch = createComfyFetch();
+    const response = await comfyFetch('http://127.0.0.1:8000/object_info/VHS_VideoCombine');
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { a: 1 });
+    assert.equal(calls[0].method, 'GET');
+    await assert.rejects(() => comfyFetch('http://broken:1/object_info/X'), TypeError);
+  } finally {
+    delete (globalThis as unknown as { window?: unknown }).window;
+  }
 });

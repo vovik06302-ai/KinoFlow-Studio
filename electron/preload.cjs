@@ -44,3 +44,36 @@ contextBridge.exposeInMainWorld('kinoflowUpdater', {
     };
   },
 });
+
+contextBridge.exposeInMainWorld('kinoflowFilm', {
+  isElectron: true,
+  checkFfmpeg: () => ipcRenderer.invoke('film:check-ffmpeg'),
+  mergeSegments: (segmentUrls, suggestedName) =>
+    ipcRenderer.invoke('film:merge', { segmentUrls, suggestedName }),
+  showFile: (filePath) => ipcRenderer.invoke('film:show-file', filePath),
+  onProgress: (callback) => {
+    const listener = (_event, payload) => {
+      callback(payload);
+    };
+    ipcRenderer.on('film:progress', listener);
+    return () => {
+      ipcRenderer.removeListener('film:progress', listener);
+    };
+  },
+});
+
+contextBridge.exposeInMainWorld('kinoflowLauncher', {
+  isElectron: true,
+  getState: () => ipcRenderer.invoke('comfy:launcher-state'),
+  start: (comfyDir) => ipcRenderer.invoke('comfy:launcher-start', comfyDir),
+  stop: () => ipcRenderer.invoke('comfy:launcher-stop'),
+  onEvent: (callback) => {
+    const listener = (_event, payload) => {
+      callback(payload);
+    };
+    ipcRenderer.on('comfy:launcher-event', listener);
+    return () => {
+      ipcRenderer.removeListener('comfy:launcher-event', listener);
+    };
+  },
+});

@@ -1,6 +1,9 @@
 import workflowT2VTemplate from '../../workflow_t2v.json';
 import workflowI2VTemplate from '../../workflow_i2v.json';
 import { extractLastFrameFromVideo } from '../utils/videoFrameUtils';
+import { PreflightError, runPreflight } from './preflightService';
+import { buildSegmentPrompt } from './storyboard';
+import type { CameraPresetId, StoryboardShot } from './storyboard';
 import type {
   BaseModelId,
   CharacterReference,
@@ -23,6 +26,17 @@ export const SEGMENT_DURATION_SEC = 5;
 export const DURATION_CHOICES: DurationChoice[] = [5, 10, 15, 20, 25, 30];
 export const FPS_CHOICES: FpsChoice[] = [16, 24];
 export const RIFE_FPS_CHOICES: RifeTargetFps[] = [24, 30];
+
+/** RIFE doubles the number of frames, so the playback rate must double as well. */
+export const RIFE_MULTIPLIER = 2;
+
+/**
+ * Real playback rate of the exported video. RIFE inserts one frame between every pair,
+ * so 16 fps -> 32 fps. Using any other rate would play the clip in slow motion.
+ */
+export function computeOutputFps(fps: number, rifeEnabled: boolean): number {
+  return rifeEnabled ? fps * RIFE_MULTIPLIER : fps;
+}
 export const IDENTITY_LOCK_MIN_WEIGHT = 0.75;
 export const IDENTITY_LOCK_MAX_WEIGHT = 0.85;
 
@@ -570,10 +584,7 @@ export function buildWorkflowFromTemplate(
   if (input.settings.rifeEnabled) {
     if (graph['58']) {
       graph['58'].inputs.frames = currentImageLink;
-      graph['58'].inputs.multiplier = Math.max(
-        2,
-        Math.ceil(input.settings.rifeTargetFps / Math.max(1, input.settings.fps)),
-      );
+      graph['58'].inputs.multiplier = RIFE_MULTIPLIER;
       currentImageLink = ['58', 0];
     }
   } else {
@@ -582,9 +593,7 @@ export function buildWorkflowFromTemplate(
 
   if (graph['60']) {
     graph['60'].inputs.images = currentImageLink;
-    graph['60'].inputs.frame_rate = input.settings.rifeEnabled
-      ? input.settings.rifeTargetFps
-      : input.settings.fps;
+    graph['60'].inputs.frame_rate = computeOutputFps(input.settings.fps, input.settings.rifeEnabled);
     if (input.filenamePrefix) {
       graph['60'].inputs.filename_prefix = input.filenamePrefix;
     }
@@ -636,6 +645,22 @@ function getElectronComfyBridge(): ElectronComfyBridge | null {
   if (typeof window === 'undefined') return null;
   const candidate = (window as unknown as { kinoflowComfy?: ElectronComfyBridge }).kinoflowComfy;
   return candidate && typeof candidate.request === 'function' ? candidate : null;
+}
+
+/**
+ * A fetch-compatible function for simple GET requests: goes through the Electron main-process
+ * bridge when it exists (no CORS problems, any port), otherwise uses the browser's fetch.
+ */
+export function createComfyFetch(): typeof fetch {
+  const bridge = getElectronComfyBridge();
+  if (!bridge) return fetch;
+  return (async (input: RequestInfo | URL) => {
+    const res = await bridge.request({ url: String(input), method: 'GET', timeoutMs: 15000 });
+    if (res.networkError) {
+      throw new TypeError(res.errorMessage || res.errorCode || 'network error');
+    }
+    return new Response(res.bodyText, { status: res.status });
+  }) as typeof fetch;
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -710,6 +735,46 @@ export function classifyConnectionError(params: {
   }
 
   return `Не удалось подключиться к ${base}. Проверьте, что ComfyUI запущен (порт 8188 для Portable или 8000 для Desktop) с флагом --enable-cors-header "*".`;
+}
+
+/**
+ * Builds the workflow variants a generation will use (T2V and/or I2V) so the pre-flight check
+ * can verify nodes and model files for all of them before anything is queued.
+ */
+export function buildPreflightGraphs(params: {
+  settings: GenerationSettings;
+  hasStartFrame: boolean;
+  isContinuation: boolean;
+}): ComfyWorkflowGraph[] {
+  const { settings, hasStartFrame, isContinuation } = params;
+  const planned = planGenerationSegments(settings.durationSec, settings.mode);
+  const graphs = new Map<string, ComfyWorkflowGraph>();
+
+  for (const segment of planned) {
+    const route = resolveAutoModelRoute({
+      modelId: settings.modelId,
+      mode: segment.mode,
+      segmentIndex: segment.index,
+      hasStartFrame: segment.index === 1 ? hasStartFrame : true,
+      isContinuation,
+    });
+    if (graphs.has(route.workflowMode)) continue;
+    graphs.set(
+      route.workflowMode,
+      buildWorkflowFromTemplate({
+        settings,
+        modeOverride: route.workflowMode,
+        positivePrompt: 'preflight',
+        negativePrompt: '',
+        characters: [],
+        startFrameFilename: route.workflowMode === 'i2v' ? 'preflight.png' : undefined,
+        hasStartFrame: route.workflowMode === 'i2v',
+        segmentIndex: segment.index,
+        isContinuation,
+      }),
+    );
+  }
+  return [...graphs.values()];
 }
 
 /**
@@ -1362,6 +1427,10 @@ export interface RunGenerationOptions {
   positivePrompt: string;
   negativePrompt: string;
   characters: CharacterReference[];
+  /** Per-segment actions and camera moves; shot i is used for the i-th 5-second segment. */
+  storyboard?: StoryboardShot[];
+  /** Camera move applied to segments whose shot has no own camera (or when there is no storyboard). */
+  defaultCamera?: CameraPresetId;
   startFrame?: StartFrameReference | null;
   isContinuation?: boolean;
   fallbackCharacterAnchors?: WorkflowBuildCharacter[];
@@ -1392,6 +1461,8 @@ export async function runComfyGeneration(
     positivePrompt,
     negativePrompt,
     characters,
+    storyboard,
+    defaultCamera = 'none',
     startFrame,
     isContinuation = false,
     fallbackCharacterAnchors = [],
@@ -1403,6 +1474,19 @@ export async function runComfyGeneration(
 
   if (settings.mode === 'i2v' && !startFrame) {
     throw new Error('В режиме «Оживление фото» загрузите стартовый кадр (Start Frame).');
+  }
+
+  const preflightReport = await runPreflight(
+    serverUrl,
+    buildPreflightGraphs({
+      settings,
+      hasStartFrame: Boolean(startFrame) || (characters.length > 0 && !isContinuation),
+      isContinuation,
+    }),
+    createComfyFetch(),
+  );
+  if (preflightReport && !preflightReport.ok) {
+    throw new PreflightError(preflightReport);
   }
 
   const uploadedChars: WorkflowBuildCharacter[] = [];
@@ -1494,7 +1578,11 @@ export async function runComfyGeneration(
     const workflow = buildWorkflowFromTemplate({
       settings,
       modeOverride: route.workflowMode,
-      positivePrompt,
+      positivePrompt: buildSegmentPrompt({
+        basePrompt: positivePrompt,
+        shot: storyboard?.[segment.index - 1],
+        defaultCamera,
+      }),
       negativePrompt,
       characters: uploadedChars,
       startFrameFilename: route.workflowMode === 'i2v' ? currentStartFrameFilename : undefined,

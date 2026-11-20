@@ -18,7 +18,9 @@ import {
   formatSegmentLabel,
   getShootingStyleOption,
 } from '../services/comfyService';
+import type { PreflightReport } from '../services/preflightService';
 import { mergeVideoSegments } from '../utils/videoFrameUtils';
+import type { FilmMergeProgress } from '../types/film';
 import type {
   GenerationHistoryItem,
   GenerationProgress,
@@ -27,6 +29,8 @@ import type {
 interface PreviewAndHistoryPanelProps {
   progress: GenerationProgress;
   generationError: string | null;
+  preflightReport: PreflightReport | null;
+  onOpenModels: () => void;
   activeVideo: GenerationHistoryItem | null;
   history: GenerationHistoryItem[];
   isGenerating: boolean;
@@ -50,6 +54,8 @@ interface PreviewAndHistoryPanelProps {
 export function PreviewAndHistoryPanel({
   progress,
   generationError,
+  preflightReport,
+  onOpenModels,
   activeVideo,
   history,
   isGenerating,
@@ -71,6 +77,9 @@ export function PreviewAndHistoryPanel({
   const [extendDuration, setExtendDuration] = useState<5 | 10 | 15>(5);
   const [isMerging, setIsMerging] = useState(false);
   const [mergeError, setMergeError] = useState<string | null>(null);
+  const [mergeNotice, setMergeNotice] = useState<string | null>(null);
+  const [mergeProgress, setMergeProgress] = useState<FilmMergeProgress | null>(null);
+  const [savedFilmPath, setSavedFilmPath] = useState<string | null>(null);
 
   const segments = activeVideo?.segments && activeVideo.segments.length > 0 ? activeVideo.segments : null;
   const activeSegment = segments
@@ -110,11 +119,69 @@ export function PreviewAndHistoryPanel({
     }
   };
 
+  // Space plays / pauses the preview unless the user is typing or pressing a control.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== 'Space' || event.repeat) return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        tag === 'BUTTON' ||
+        tag === 'A' ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+      const video = videoRef.current;
+      if (!video) return;
+      event.preventDefault();
+      if (video.paused) {
+        void video.play().catch(() => undefined);
+      } else {
+        video.pause();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   const handleMergeAndDownload = async () => {
     if (!segments || segments.length < 2) return;
     setIsMerging(true);
     setMergeError(null);
+    setMergeNotice(null);
+    setSavedFilmPath(null);
+    setMergeProgress(null);
     try {
+      const filmBridge = window.kinoflowFilm;
+      if (filmBridge) {
+        // Desktop app: lossless-quality join with FFmpeg, duplicated stitch frames removed.
+        const unsubscribe = filmBridge.onProgress(setMergeProgress);
+        try {
+          const result = await filmBridge.mergeSegments(
+            segments.map((s) => s.videoUrl),
+            `kinoflow_film_${activeVideo?.durationSec ?? 10}s.mp4`,
+          );
+          if (result.ok && result.path) {
+            setSavedFilmPath(result.path);
+            setMergeNotice(`Фильм сохранён: ${result.path}`);
+            return;
+          }
+          if (result.code === 'CANCELLED') return;
+          if (result.code !== 'FFMPEG_NOT_FOUND') {
+            throw new Error(result.error ?? 'Не удалось склеить видеосегменты.');
+          }
+          setMergeNotice(
+            'FFmpeg не найден, использована встроенная склейка (в реальном времени, качество ниже). Установите FFmpeg для быстрой склейки без потерь.',
+          );
+        } finally {
+          unsubscribe();
+        }
+      }
+
       const { blob, extension } = await mergeVideoSegments(
         segments.map((s) => s.videoUrl),
         activeVideo?.fps ?? 16,
@@ -133,6 +200,7 @@ export function PreviewAndHistoryPanel({
       );
     } finally {
       setIsMerging(false);
+      setMergeProgress(null);
     }
   };
 
@@ -400,7 +468,15 @@ export function PreviewAndHistoryPanel({
                 ) : (
                   <Layers className="h-3.5 w-3.5" aria-hidden="true" />
                 )}
-                <span>{isMerging ? 'Склейка...' : 'Склеить и скачать'}</span>
+                <span>
+                  {isMerging
+                    ? mergeProgress
+                      ? mergeProgress.phase === 'downloading'
+                        ? `Загрузка ${mergeProgress.index}/${mergeProgress.total}...`
+                        : 'Кодирование...'
+                      : 'Склейка...'
+                    : 'Склеить и скачать'}
+                </span>
               </button>
             </div>
           )}
@@ -484,6 +560,24 @@ export function PreviewAndHistoryPanel({
                 </div>
               )}
 
+              {mergeNotice && (
+                <div
+                  role="status"
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#2A3A2E] bg-[#111C16] px-3 py-2 text-xs text-[#9AE6B4]"
+                >
+                  <span className="min-w-0 break-all">{mergeNotice}</span>
+                  {savedFilmPath && window.kinoflowFilm ? (
+                    <button
+                      type="button"
+                      onClick={() => void window.kinoflowFilm?.showFile(savedFilmPath)}
+                      className="shrink-0 rounded border border-[#2F4A38] px-2 py-1 text-[11px] font-medium hover:bg-[#162A1E]"
+                    >
+                      Показать в папке
+                    </button>
+                  ) : null}
+                </div>
+              )}
+
               <div>
                 <p className="line-clamp-2 text-xs leading-relaxed text-[#CBD5E1]">
                   {activeVideo.enhancedPrompt || activeVideo.prompt}
@@ -508,7 +602,7 @@ export function PreviewAndHistoryPanel({
                   <span>
                     {activeVideo.durationSec} сек ·{' '}
                     {activeVideo.rifeEnabled
-                      ? `${activeVideo.rifeTargetFps ?? activeVideo.outputFps ?? 24} fps (RIFE)`
+                      ? `${activeVideo.outputFps ?? activeVideo.fps * 2} fps (RIFE)`
                       : `${activeVideo.fps} fps`}
                   </span>
                   {activeVideo.shootingStyle && (
@@ -546,8 +640,70 @@ export function PreviewAndHistoryPanel({
           >
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#EF4444]" aria-hidden="true" />
             <div className="min-w-0 flex-1 space-y-1">
-              <p className="font-medium text-[#FECACA]">Не удалось выполнить генерацию</p>
+              <p className="font-medium text-[#FECACA]">
+                {preflightReport ? 'ComfyUI не готов к запуску' : 'Не удалось выполнить генерацию'}
+              </p>
               <p className="leading-relaxed text-[#FCA5A5]/90">{generationError}</p>
+              {preflightReport && (
+                <div className="space-y-2 pt-1" data-testid="preflight-report">
+                  {preflightReport.missingNodes.length > 0 && (
+                    <div>
+                      <p className="font-medium text-[#FECACA]">Не установлены ноды</p>
+                      <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[#FCA5A5]/90">
+                        {preflightReport.missingNodes.map((node) => (
+                          <li key={node.classType}>
+                            <span className="font-mono">{node.classType}</span>
+                            {node.pack ? (
+                              <>
+                                {' — установите '}
+                                <a
+                                  href={node.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="underline underline-offset-2"
+                                >
+                                  {node.pack}
+                                </a>
+                              </>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {preflightReport.missingFiles.length > 0 && (
+                    <div>
+                      <p className="font-medium text-[#FECACA]">Не найдены файлы моделей</p>
+                      <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[#FCA5A5]/90">
+                        {preflightReport.missingFiles.map((file) => (
+                          <li key={`${file.classType}-${file.value}`}>
+                            <span className="font-mono">{file.value}</span>
+                            {' → '}
+                            <span className="font-mono">{file.folder}</span>
+                            {!file.catalogModelId && file.value.toLowerCase().endsWith('.gguf')
+                              ? ' (GGUF скачивается вручную)'
+                              : ''}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    {preflightReport.missingFiles.some((file) => file.catalogModelId) && (
+                      <button
+                        type="button"
+                        onClick={onOpenModels}
+                        className="rounded-md border border-[#E58E26] bg-[#2A1D0B] px-3 py-1.5 text-xs font-semibold text-[#F5B461] hover:bg-[#3A2810]"
+                      >
+                        Открыть «Модели и установка»
+                      </button>
+                    )}
+                    <span className="text-[11px] text-[#FCA5A5]/70">
+                      После установки перезапустите ComfyUI и повторите генерацию.
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -614,7 +770,7 @@ export function PreviewAndHistoryPanel({
                       <span>
                         {item.durationSec}с ·{' '}
                         {item.rifeEnabled
-                          ? `${item.rifeTargetFps ?? item.outputFps ?? 24} fps RIFE`
+                          ? `${item.outputFps ?? item.fps * 2} fps RIFE`
                           : `${item.fps} fps`}
                       </span>
                       <span aria-hidden="true">·</span>
