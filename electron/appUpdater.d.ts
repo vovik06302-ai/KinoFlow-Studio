@@ -36,6 +36,7 @@ export declare function downloadToFile(options: {
 }): Promise<{ path: string; size: number }>;
 
 export declare class UpdateManager {
+  downloadedPath: string | null;
   constructor(options: {
     repo?: string;
     currentVersion: string;
