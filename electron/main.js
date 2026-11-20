@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, session, shell } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,43 +7,82 @@ import { ModelDownloadManager, scanModelsDirectory } from './modelDownloader.js'
 import { performComfyRequest, probeLocalComfyUrls } from './comfyBridge.js';
 import { ComfyLauncher, findLaunchScript } from './comfyLauncher.js';
 import { findFfmpeg, isHttpUrl, mergeSegments } from './filmMerger.js';
+import {
+  appendStartupLog,
+  isLocalComfyHttpUrl,
+  isLocalComfyUrl,
+  resolveRendererEntryPath,
+  resolveWindowIconPath,
+} from './startupHelpers.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const LOCAL_COMFY_HTTP_FILTERS = [
-  'http://127.0.0.1:*/*',
-  'http://localhost:*/*',
-  'http://[::1]:*/*',
-  'http://192.168.*/*',
-  'http://10.*/*',
-];
-
-const LOCAL_COMFY_ALL_FILTERS = [
-  ...LOCAL_COMFY_HTTP_FILTERS,
-  'ws://127.0.0.1:*/*',
-  'ws://localhost:*/*',
-  'ws://[::1]:*/*',
-  'ws://192.168.*/*',
-  'ws://10.*/*',
-];
-
 const modelDownloadManager = new ModelDownloadManager();
 let ipcRegistered = false;
 let updaterRegistered = false;
+let mainWindowRef = null;
+
+function getStartupLogPath() {
+  try {
+    return path.join(app.getPath('userData'), 'startup.log');
+  } catch {
+    return null;
+  }
+}
+
+function logStartupError(label, error) {
+  console.error(`[KinoFlow] ${label}:`, error);
+  appendStartupLog(getStartupLogPath(), label, error);
+}
+
+process.on('uncaughtException', (error) => {
+  logStartupError('uncaughtException', error);
+  if (app.isReady()) {
+    dialog.showErrorBox(
+      'KinoFlow Studio — ошибка запуска',
+      `Произошла непредвиденная ошибка:\n${error?.message ?? error}\n\nЛог сохранён в: ${getStartupLogPath() ?? 'папке данных приложения'}`,
+    );
+  }
+});
+
+process.on('unhandledRejection', (reason) => {
+  logStartupError('unhandledRejection', reason);
+});
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    const target = mainWindowRef ?? BrowserWindow.getAllWindows()[0];
+    if (target && !target.isDestroyed()) {
+      if (target.isMinimized()) target.restore();
+      if (!target.isVisible()) target.show();
+      target.focus();
+    }
+  });
+}
 
 /**
  * Configures Electron session headers so the packaged React UI (loaded via file://)
  * can directly stream videos, open WebSockets, and send requests to a local/LAN ComfyUI
  * server on any port (8188 Portable, 8000 Desktop, etc.) without Origin, CORS, or
  * Chromium Private Network Access rejections.
+ *
+ * Uses programmatic host filtering instead of Chromium `URLPattern` strings because
+ * trailing wildcards in IP hostnames (192.168.x.x / 10.x.x.x) throw
+ * `Invalid url pattern` and abort app startup.
  */
 function configureLocalComfyAccess() {
-  const defaultSession = session.defaultSession;
+  try {
+    const defaultSession = session.defaultSession;
 
-  defaultSession.webRequest.onBeforeSendHeaders(
-    { urls: LOCAL_COMFY_ALL_FILTERS },
-    (details, callback) => {
+    defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
+      if (!isLocalComfyUrl(details.url)) {
+        callback({});
+        return;
+      }
       const requestHeaders = { ...details.requestHeaders };
       try {
         const parsed = new URL(details.url);
@@ -53,12 +92,13 @@ function configureLocalComfyAccess() {
         requestHeaders.Origin = 'http://127.0.0.1:8188';
       }
       callback({ requestHeaders });
-    },
-  );
+    });
 
-  defaultSession.webRequest.onHeadersReceived(
-    { urls: LOCAL_COMFY_HTTP_FILTERS },
-    (details, callback) => {
+    defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      if (!isLocalComfyHttpUrl(details.url)) {
+        callback({});
+        return;
+      }
       const headers = { ...(details.responseHeaders ?? {}) };
 
       // Strip existing case-variant CORS headers before injecting canonical values
@@ -87,8 +127,10 @@ function configureLocalComfyAccess() {
       }
 
       callback(responseUpdate);
-    },
-  );
+    });
+  } catch (error) {
+    logStartupError('configureLocalComfyAccess', error);
+  }
 }
 
 function registerModelManagerIpc() {
@@ -286,34 +328,65 @@ function registerUpdaterIpc() {
 
   ipcMain.handle('update:install', async () => {
     try {
-      updateManager.install();
-      // Give the installer a moment to start, then close the app so files can be replaced.
-      setTimeout(() => app.quit(), 800);
+      const installerPath = updateManager.getDownloadedPath();
+      if (!installerPath) {
+        throw new Error('Файл обновления не найден. Загрузите обновление заново.');
+      }
+      if (process.platform === 'win32') {
+        const openError = await shell.openPath(installerPath);
+        if (openError) {
+          updateManager.install();
+        }
+      } else {
+        updateManager.install();
+      }
+      // Stop background tasks and quit cleanly so the NSIS installer can overwrite files.
+      comfyLauncher.stop();
+      modelDownloadManager.cancel();
+      setTimeout(() => app.quit(), 600);
       return { ok: true };
     } catch (error) {
+      logStartupError('update:install', error);
       return { ok: false, error: String(error?.message ?? error) };
     }
   });
 }
 
-function resolveRendererEntry() {
-  const rendererPath = path.join(__dirname, '..', 'build-renderer', 'index.html');
-  if (fs.existsSync(rendererPath)) {
-    return rendererPath;
+function loadSafeWindowIcon() {
+  try {
+    const iconPath = resolveWindowIconPath(__dirname);
+    if (!iconPath) return undefined;
+    const img = nativeImage.createFromPath(iconPath);
+    return img.isEmpty() ? undefined : img;
+  } catch (error) {
+    logStartupError('loadSafeWindowIcon', error);
+    return undefined;
   }
-  return path.join(__dirname, '..', 'dist', 'index.html');
+}
+
+function buildLoadErrorDataUrl(title, details) {
+  const safeTitle = String(title).replace(/[<>&]/g, '');
+  const safeDetails = String(details).replace(/[<>&]/g, '');
+  const html = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>KinoFlow Studio</title>
+<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0B0D11;color:#E6E9F0;font-family:system-ui,sans-serif;padding:24px}
+.box{max-width:560px;background:#141821;border:1px solid #7F1D1D;border-radius:8px;padding:24px}
+h1{margin:0 0 10px;font-size:18px;color:#F8FAFC}p{margin:0 0 12px;font-size:13px;color:#CBD5E1;line-height:1.5}
+pre{margin:0;padding:12px;background:#0B0D11;border:1px solid #222734;border-radius:6px;color:#FCA5A5;font-size:12px;white-space:pre-wrap;word-break:break-word}</style></head>
+<body><div class="box"><h1>${safeTitle}</h1><p>Не удалось загрузить интерфейс приложения. Переустановите KinoFlow Studio из последнего релиза или проверьте лог запуска.</p><pre>${safeDetails}</pre></div></body></html>`;
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
 function createMainWindow() {
   Menu.setApplicationMenu(null);
 
+  const windowIcon = loadSafeWindowIcon();
   const mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
     minWidth: 960,
     minHeight: 640,
     title: 'KinoFlow Studio',
-    icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
+    ...(windowIcon ? { icon: windowIcon } : {}),
     backgroundColor: '#0B0D11',
     autoHideMenuBar: true,
     show: false,
@@ -325,10 +398,37 @@ function createMainWindow() {
     },
   });
 
+  mainWindowRef = mainWindow;
+  mainWindow.on('closed', () => {
+    if (mainWindowRef === mainWindow) {
+      mainWindowRef = null;
+    }
+  });
+
   mainWindow.setMenuBarVisibility(false);
 
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
+  const ensureVisible = () => {
+    if (!mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      mainWindow.show();
+    }
+  };
+
+  mainWindow.once('ready-to-show', ensureVisible);
+  // Safety net: never leave the window hidden if external resources (e.g. Google Fonts) stall first paint.
+  const showFallbackTimer = setTimeout(ensureVisible, 2500);
+  mainWindow.once('show', () => clearTimeout(showFallbackTimer));
+  mainWindow.once('closed', () => clearTimeout(showFallbackTimer));
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    // Ignore aborted/subframe failures; only surface main-frame load failures.
+    if (errorCode === -3) return;
+    logStartupError('did-fail-load', `${errorCode} ${errorDescription} (${validatedURL})`);
+    ensureVisible();
+  });
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    logStartupError('render-process-gone', details);
+    ensureVisible();
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -340,26 +440,58 @@ function createMainWindow() {
 
   const devUrl = process.env.ELECTRON_DEV_URL;
   if (devUrl) {
-    void mainWindow.loadURL(devUrl);
+    mainWindow.loadURL(devUrl).catch((error) => {
+      logStartupError('loadURL', error);
+      ensureVisible();
+      void mainWindow.loadURL(
+        buildLoadErrorDataUrl('Ошибка загрузки dev-сервера', String(error?.message ?? error)),
+      );
+    });
   } else {
-    void mainWindow.loadFile(resolveRendererEntry());
+    const entryPath = resolveRendererEntryPath(__dirname);
+    if (!entryPath) {
+      const msg = `Файл интерфейса build-renderer/index.html не найден рядом с ${__dirname}`;
+      logStartupError('resolveRendererEntryPath', msg);
+      ensureVisible();
+      void mainWindow.loadURL(buildLoadErrorDataUrl('Файлы интерфейса не найдены', msg));
+      return;
+    }
+    mainWindow.loadFile(entryPath).catch((error) => {
+      logStartupError('loadFile', error);
+      ensureVisible();
+      void mainWindow.loadURL(
+        buildLoadErrorDataUrl('Ошибка открытия интерфейса', String(error?.message ?? error)),
+      );
+    });
   }
 }
 
-app.whenReady().then(() => {
-  configureLocalComfyAccess();
-  registerModelManagerIpc();
-  registerUpdaterIpc();
-  registerFilmIpc();
-  registerLauncherIpc();
-  createMainWindow();
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
+if (hasSingleInstanceLock) {
+  app
+    .whenReady()
+    .then(() => {
+      configureLocalComfyAccess();
+      registerModelManagerIpc();
+      registerUpdaterIpc();
+      registerFilmIpc();
+      registerLauncherIpc();
       createMainWindow();
-    }
-  });
-});
+
+      app.on('activate', () => {
+        if (BrowserWindow.getAllWindows().length === 0) {
+          createMainWindow();
+        }
+      });
+    })
+    .catch((error) => {
+      logStartupError('app.whenReady', error);
+      dialog.showErrorBox(
+        'KinoFlow Studio — ошибка запуска',
+        `Не удалось запустить приложение:\n${error?.message ?? error}\n\nЛог: ${getStartupLogPath() ?? ''}`,
+      );
+      app.quit();
+    });
+}
 
 app.on('before-quit', () => {
   modelDownloadManager.cancel();

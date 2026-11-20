@@ -1,7 +1,7 @@
 {
   "name": "kinoflow-studio",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "KinoFlow Studio desktop and web client for local ComfyUI video generation",
   "type": "module",
   "main": "electron/main.js",
@@ -44,16 +44,24 @@
   "build": {
     "appId": "com.kinoflow.studio",
     "productName": "KinoFlowStudio",
+    "npmRebuild": false,
     "directories": {
       "output": "dist"
     },
     "files": [
       "build-renderer/**/*",
-      "electron/**/*",
+      "electron/**/*.js",
+      "electron/**/*.cjs",
+      "!electron/**/*.test.ts",
+      "!electron/**/*.d.ts",
+      "!node_modules/**/*",
       "workflow_api.json",
       "workflow_t2v.json",
       "workflow_i2v.json",
       "package.json",
+      "assets/icon.ico"
+    ],
+    "asarUnpack": [
       "assets/icon.ico"
     ],
     "win": {
@@ -70,10 +78,13 @@
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "KinoFlowStudio"
+      "shortcutName": "KinoFlowStudio",
+      "runAfterFinish": true
     }
   }
 }

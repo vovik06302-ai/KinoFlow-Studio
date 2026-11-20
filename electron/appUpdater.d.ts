@@ -48,5 +48,6 @@ export declare class UpdateManager {
   check(): Promise<UpdateInfo>;
   download(): Promise<{ path: string }>;
   cancel(): { cancelled: boolean };
+  getDownloadedPath(): string | null;
   install(spawnImpl?: unknown): { started: boolean };
 }

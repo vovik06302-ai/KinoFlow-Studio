@@ -234,12 +234,23 @@ export class UpdateManager {
     return { cancelled: false };
   }
 
+  getDownloadedPath() {
+    if (!this.downloadedPath || !fs.existsSync(this.downloadedPath)) {
+      return null;
+    }
+    return this.downloadedPath;
+  }
+
   /** Starts the downloaded installer detached from this process. */
   install(spawnImpl = spawn) {
-    if (!this.downloadedPath || !fs.existsSync(this.downloadedPath)) {
+    const installerPath = this.getDownloadedPath();
+    if (!installerPath) {
       throw new Error('Файл обновления не найден. Загрузите обновление заново.');
     }
-    const child = spawnImpl(this.downloadedPath, [], { detached: true, stdio: 'ignore' });
+    const child = spawnImpl(installerPath, [], { detached: true, stdio: 'ignore' });
+    child.on?.('error', () => {
+      // Prevent unhandled EventEmitter 'error' crash if Windows refuses direct spawn
+    });
     child.unref?.();
     return { started: true };
   }
