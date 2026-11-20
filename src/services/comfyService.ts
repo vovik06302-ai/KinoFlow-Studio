@@ -593,14 +593,191 @@ export function buildWorkflowFromTemplate(
   return graph;
 }
 
+interface ElectronComfyRequestOptions {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  timeoutMs?: number;
+  multipart?: {
+    fieldName: string;
+    fileName: string;
+    contentType: string;
+    bytesBase64: string;
+    fields?: Record<string, string>;
+  };
+}
+
+interface ElectronComfyResponse {
+  ok: boolean;
+  status: number;
+  statusText: string;
+  bodyText: string;
+  networkError?: boolean;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+interface ElectronComfyProbeHit {
+  baseUrl: string;
+  systemStats: {
+    system?: { comfyui_version?: string };
+    devices?: Array<{ name?: string; vram_total?: number }>;
+  };
+}
+
+interface ElectronComfyBridge {
+  isElectron?: boolean;
+  request: (options: ElectronComfyRequestOptions) => Promise<ElectronComfyResponse>;
+  probe: (excludeBaseUrl?: string, candidatePorts?: number[]) => Promise<ElectronComfyProbeHit | null>;
+}
+
+function getElectronComfyBridge(): ElectronComfyBridge | null {
+  if (typeof window === 'undefined') return null;
+  const candidate = (window as unknown as { kinoflowComfy?: ElectronComfyBridge }).kinoflowComfy;
+  return candidate && typeof candidate.request === 'function' ? candidate : null;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...slice);
+  }
+  return btoa(binary);
+}
+
+function buildOnlineConnectionInfo(
+  data: {
+    system?: { comfyui_version?: string };
+    devices?: Array<{ name?: string; vram_total?: number }>;
+  },
+  detectedUrl?: string,
+): ConnectionInfo {
+  const primaryDevice = data.devices?.[0];
+  const vramTotalGb =
+    typeof primaryDevice?.vram_total === 'number'
+      ? Math.round((primaryDevice.vram_total / 1024 ** 3) * 10) / 10
+      : undefined;
+
+  return {
+    status: 'online',
+    gpuName: primaryDevice?.name,
+    vramTotalGb,
+    comfyVersion: data.system?.comfyui_version,
+    message: detectedUrl
+      ? `Соединение установлено (автопоиск: ${detectedUrl})`
+      : 'Соединение установлено',
+    checkedAt: new Date().toLocaleTimeString('ru-RU'),
+    detectedUrl,
+  };
+}
+
+/**
+ * Produces an accurate, actionable Russian diagnostic message for failed ComfyUI connections,
+ * distinguishing HTTPS Mixed Content blocks, closed ports (ECONNREFUSED), timeouts, and CORS.
+ */
+export function classifyConnectionError(params: {
+  serverUrl: string;
+  isElectron: boolean;
+  pageProtocol?: string;
+  isAbort?: boolean;
+  errorCode?: string;
+}): string {
+  const base = normalizeBaseUrl(params.serverUrl);
+  const code = (params.errorCode ?? '').toUpperCase();
+
+  if (params.isAbort || code === 'ABORT_ERR' || code === 'ETIMEDOUT') {
+    return `Таймаут подключения к ${base}. Проверьте, запущен ли ComfyUI и не завис ли сервер.`;
+  }
+
+  if (params.isElectron) {
+    if (code === 'ECONNREFUSED') {
+      return `ComfyUI не отвечает по адресу ${base} (порт закрыт). Запустите ComfyUI (run_nvidia_gpu.bat или ComfyUI Desktop) или переключите порт (8188 / 8000).`;
+    }
+    if (code === 'ENOTFOUND' || code === 'EHOSTUNREACH') {
+      return `Хост ${base} недоступен (${code}). Проверьте правильность IP-адреса и порта ComfyUI.`;
+    }
+    return `Не удалось подключиться к ${base}${code ? ` (${code})` : ''}. Убедитесь, что ComfyUI запущен на этом порту.`;
+  }
+
+  const isHttpsPage = params.pageProtocol === 'https:';
+  const isHttpTarget = /^http:\/\//i.test(base);
+  if (isHttpsPage && isHttpTarget) {
+    return `Браузер блокирует запросы с HTTPS-страницы на локальный ${base} (Mixed Content). Откройте KinoFlow Studio в Windows-приложении (.exe) или локально по http://localhost:3000.`;
+  }
+
+  return `Не удалось подключиться к ${base}. Проверьте, что ComfyUI запущен (порт 8188 для Portable или 8000 для Desktop) с флагом --enable-cors-header "*".`;
+}
+
 /**
  * Checks connectivity to a local ComfyUI server via GET /system_stats.
+ * In Electron, requests run natively in the main process (no CORS flag required)
+ * and automatically probe standard ports (8188 / 8000 / 8189) if the selected port is closed.
  */
 export async function checkConnection(
   serverUrl: string,
   timeoutMs: number = 4500,
 ): Promise<ConnectionInfo> {
   const base = normalizeBaseUrl(serverUrl);
+  const electronBridge = getElectronComfyBridge();
+
+  if (electronBridge) {
+    const res = await electronBridge.request({
+      url: `${base}/system_stats`,
+      method: 'GET',
+      timeoutMs,
+    });
+
+    if (res.ok) {
+      try {
+        const data = JSON.parse(res.bodyText) as {
+          system?: { comfyui_version?: string };
+          devices?: Array<{ name?: string; vram_total?: number }>;
+        };
+        return buildOnlineConnectionInfo(data);
+      } catch {
+        return {
+          status: 'offline',
+          message: `Сервер по адресу ${base} вернул некорректный JSON (возможно, этот порт занят другой программой).`,
+          checkedAt: new Date().toLocaleTimeString('ru-RU'),
+        };
+      }
+    }
+
+    if (!res.networkError) {
+      return {
+        status: 'offline',
+        message: `Сервер ответил статусом HTTP ${res.status}.`,
+        checkedAt: new Date().toLocaleTimeString('ru-RU'),
+      };
+    }
+
+    // If port is closed on loopback, automatically check other standard ComfyUI ports (8188 / 8000 / 8189)
+    if (
+      (res.errorCode === 'ECONNREFUSED' || res.errorCode === 'NETWORK_ERROR') &&
+      /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(base)
+    ) {
+      const detected = await electronBridge.probe(base).catch(() => null);
+      if (detected) {
+        return buildOnlineConnectionInfo(detected.systemStats, detected.baseUrl);
+      }
+    }
+
+    return {
+      status: 'offline',
+      message: classifyConnectionError({
+        serverUrl: base,
+        isElectron: true,
+        isAbort: res.errorCode === 'ABORT_ERR',
+        errorCode: res.errorCode,
+      }),
+      checkedAt: new Date().toLocaleTimeString('ru-RU'),
+    };
+  }
+
   const controller = new AbortController();
   const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
 
@@ -624,27 +801,19 @@ export async function checkConnection(
       devices?: Array<{ name?: string; vram_total?: number }>;
     };
 
-    const primaryDevice = data.devices?.[0];
-    const vramTotalGb =
-      typeof primaryDevice?.vram_total === 'number'
-        ? Math.round((primaryDevice.vram_total / 1024 ** 3) * 10) / 10
-        : undefined;
-
-    return {
-      status: 'online',
-      gpuName: primaryDevice?.name,
-      vramTotalGb,
-      comfyVersion: data.system?.comfyui_version,
-      message: 'Соединение установлено',
-      checkedAt: new Date().toLocaleTimeString('ru-RU'),
-    };
+    return buildOnlineConnectionInfo(data);
   } catch (err) {
     const isAbort = err instanceof DOMException && err.name === 'AbortError';
+    const pageProtocol =
+      typeof window !== 'undefined' && window.location ? window.location.protocol : undefined;
     return {
       status: 'offline',
-      message: isAbort
-        ? 'Таймаут подключения. Проверьте, запущен ли ComfyUI.'
-        : 'Не удалось подключиться. Убедитесь, что ComfyUI запущен с --enable-cors-header "*".',
+      message: classifyConnectionError({
+        serverUrl: base,
+        isElectron: false,
+        pageProtocol,
+        isAbort,
+      }),
       checkedAt: new Date().toLocaleTimeString('ru-RU'),
     };
   } finally {
@@ -661,6 +830,47 @@ export async function uploadImage(
   subfolder: string = 'kinoflow_refs',
 ): Promise<UploadedImageResult> {
   const base = normalizeBaseUrl(serverUrl);
+  const electronBridge = getElectronComfyBridge();
+
+  if (electronBridge) {
+    const bytesBase64 = arrayBufferToBase64(await file.arrayBuffer());
+    const res = await electronBridge.request({
+      url: `${base}/upload/image`,
+      method: 'POST',
+      timeoutMs: 30000,
+      multipart: {
+        fieldName: 'image',
+        fileName: file.name,
+        contentType: file.type || 'image/png',
+        bytesBase64,
+        fields: {
+          type: 'input',
+          subfolder,
+          overwrite: 'true',
+        },
+      },
+    });
+
+    if (!res.ok) {
+      throw new Error(
+        `Ошибка загрузки изображения «${file.name}» (${res.status || res.errorCode || 'ERR'}): ${
+          res.bodyText || res.errorMessage || res.statusText
+        }`,
+      );
+    }
+
+    const data = JSON.parse(res.bodyText) as Partial<UploadedImageResult>;
+    if (!data.name) {
+      throw new Error(`ComfyUI не вернул имя загруженного файла для «${file.name}».`);
+    }
+
+    return {
+      name: data.subfolder ? `${data.subfolder}/${data.name}` : data.name,
+      subfolder: data.subfolder ?? '',
+      type: data.type ?? 'input',
+    };
+  }
+
   const formData = new FormData();
   formData.append('image', file, file.name);
   formData.append('type', 'input');
@@ -701,26 +911,53 @@ export async function queuePrompt(
   clientId: string,
 ): Promise<{ promptId: string; number?: number }> {
   const base = normalizeBaseUrl(serverUrl);
-  const response = await fetch(`${base}/prompt`, {
-    method: 'POST',
-    mode: 'cors',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      prompt: workflow,
-      client_id: clientId,
-    }),
+  const payload = JSON.stringify({
+    prompt: workflow,
+    client_id: clientId,
   });
+  const electronBridge = getElectronComfyBridge();
 
-  if (!response.ok) {
-    const errText = await response.text().catch(() => '');
+  let ok: boolean;
+  let status: number;
+  let statusText: string;
+  let bodyText: string;
+
+  if (electronBridge) {
+    const res = await electronBridge.request({
+      url: `${base}/prompt`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: payload,
+      timeoutMs: 30000,
+    });
+    ok = res.ok;
+    status = res.status;
+    statusText = res.errorMessage || res.statusText;
+    bodyText = res.bodyText;
+  } else {
+    const response = await fetch(`${base}/prompt`, {
+      method: 'POST',
+      mode: 'cors',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: payload,
+    });
+    ok = response.ok;
+    status = response.status;
+    statusText = response.statusText;
+    bodyText = await response.text().catch(() => '');
+  }
+
+  if (!ok) {
     throw new Error(
-      `ComfyUI отклонил задачу /prompt (${response.status}): ${errText || response.statusText}`,
+      `ComfyUI отклонил задачу /prompt (${status}): ${bodyText || statusText}`,
     );
   }
 
-  const data = (await response.json()) as {
+  const data = JSON.parse(bodyText) as {
     prompt_id?: string;
     number?: number;
     error?: { message?: string };
@@ -748,7 +985,22 @@ export async function getHistory(
   promptId: string,
 ): Promise<Record<string, unknown>> {
   const base = normalizeBaseUrl(serverUrl);
-  const response = await fetch(`${base}/history/${encodeURIComponent(promptId)}`, {
+  const url = `${base}/history/${encodeURIComponent(promptId)}`;
+  const electronBridge = getElectronComfyBridge();
+
+  if (electronBridge) {
+    const res = await electronBridge.request({
+      url,
+      method: 'GET',
+      timeoutMs: 15000,
+    });
+    if (!res.ok) {
+      throw new Error(`Не удалось получить историю задачи (${res.status || res.errorCode}).`);
+    }
+    return JSON.parse(res.bodyText) as Record<string, unknown>;
+  }
+
+  const response = await fetch(url, {
     method: 'GET',
     mode: 'cors',
   });
@@ -765,6 +1017,17 @@ export async function getHistory(
  */
 export async function interruptGeneration(serverUrl: string): Promise<void> {
   const base = normalizeBaseUrl(serverUrl);
+  const electronBridge = getElectronComfyBridge();
+
+  if (electronBridge) {
+    await electronBridge.request({
+      url: `${base}/interrupt`,
+      method: 'POST',
+      timeoutMs: 8000,
+    });
+    return;
+  }
+
   await fetch(`${base}/interrupt`, {
     method: 'POST',
     mode: 'cors',

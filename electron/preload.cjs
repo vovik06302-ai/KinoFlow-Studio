@@ -20,20 +20,9 @@ contextBridge.exposeInMainWorld('kinoflowModels', {
   },
 });
 
-contextBridge.exposeInMainWorld('kinoflowUpdater', {
+contextBridge.exposeInMainWorld('kinoflowComfy', {
   isElectron: true,
-  getVersion: () => ipcRenderer.invoke('update:version'),
-  checkForUpdate: () => ipcRenderer.invoke('update:check'),
-  downloadUpdate: () => ipcRenderer.invoke('update:download'),
-  cancelDownload: () => ipcRenderer.invoke('update:cancel'),
-  installUpdate: () => ipcRenderer.invoke('update:install'),
-  onProgress: (callback) => {
-    const listener = (_event, payload) => {
-      callback(payload);
-    };
-    ipcRenderer.on('update:progress', listener);
-    return () => {
-      ipcRenderer.removeListener('update:progress', listener);
-    };
-  },
+  request: (options) => ipcRenderer.invoke('comfy:request', options),
+  probe: (excludeBaseUrl, candidatePorts) =>
+    ipcRenderer.invoke('comfy:probe', { excludeBaseUrl, candidatePorts }),
 });

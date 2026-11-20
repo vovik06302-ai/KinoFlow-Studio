@@ -177,6 +177,31 @@ export function SettingsPanel({
           </button>
         </div>
 
+        <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[#64748B]">
+          <span>Быстрый порт:</span>
+          {[
+            { label: '8188 · Portable', url: 'http://127.0.0.1:8188' },
+            { label: '8000 · Desktop', url: 'http://127.0.0.1:8000' },
+          ].map((preset) => {
+            const isCurrent = settings.serverUrl.trim().replace(/\/+$/, '') === preset.url;
+            return (
+              <button
+                key={preset.url}
+                type="button"
+                disabled={disabled}
+                onClick={() => onChange({ serverUrl: preset.url })}
+                className={`rounded border px-2 py-0.5 font-mono text-[11px] transition-colors focus-visible:outline-2 focus-visible:outline-[#E58E26] disabled:opacity-50 ${
+                  isCurrent
+                    ? 'border-[#E58E26]/60 bg-[#E58E26]/10 text-[#F6AD55]'
+                    : 'border-[#262C3A] bg-[#141821] text-[#94A3B8] hover:border-[#3A4358] hover:text-[#E2E8F0]'
+                }`}
+              >
+                {preset.label}
+              </button>
+            );
+          })}
+        </div>
+
         {connection.message && (
           <p
             className={`mt-2 text-xs leading-relaxed ${

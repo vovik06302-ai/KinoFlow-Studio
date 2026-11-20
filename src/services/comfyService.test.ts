@@ -7,6 +7,7 @@ import {
   AUTO_T2V_MODEL_FILE,
   DEFAULT_NEGATIVE_PROMPT,
   buildWorkflowFromTemplate,
+  classifyConnectionError,
   computeChainedCharacterWeight,
   computeUpscaleTargetSize,
   describeAutoRoutingStatus,
@@ -386,4 +387,37 @@ test('describeAutoRoutingStatus reports concise Russian status for T2V, chained 
     }),
     'Режим: Авто → Продолжение сцены (I2V)',
   );
+});
+
+test('classifyConnectionError distinguishes Electron ECONNREFUSED, HTTPS Mixed Content, timeouts, and browser CORS', () => {
+  const electronRefused = classifyConnectionError({
+    serverUrl: 'http://127.0.0.1:8188',
+    isElectron: true,
+    errorCode: 'ECONNREFUSED',
+  });
+  assert.match(electronRefused, /порт закрыт/i);
+  assert.match(electronRefused, /8188 \/ 8000/);
+
+  const httpsMixed = classifyConnectionError({
+    serverUrl: 'http://127.0.0.1:8188',
+    isElectron: false,
+    pageProtocol: 'https:',
+  });
+  assert.match(httpsMixed, /Mixed Content/i);
+  assert.match(httpsMixed, /\.exe/);
+
+  const timeoutMsg = classifyConnectionError({
+    serverUrl: 'http://127.0.0.1:8188',
+    isElectron: false,
+    isAbort: true,
+  });
+  assert.match(timeoutMsg, /Таймаут/);
+
+  const localHttpMsg = classifyConnectionError({
+    serverUrl: 'http://127.0.0.1:8188',
+    isElectron: false,
+    pageProtocol: 'http:',
+  });
+  assert.match(localHttpMsg, /--enable-cors-header/);
+  assert.match(localHttpMsg, /8000/);
 });

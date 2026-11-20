@@ -95,6 +95,7 @@ export interface ConnectionInfo {
   vramTotalGb?: number;
   comfyVersion?: string;
   checkedAt?: string;
+  detectedUrl?: string;
 }
 
 export type GenerationPhase =

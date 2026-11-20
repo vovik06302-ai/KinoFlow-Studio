@@ -4,15 +4,26 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { UpdateManager } from './appUpdater.js';
 import { ModelDownloadManager, scanModelsDirectory } from './modelDownloader.js';
+import { performComfyRequest, probeLocalComfyUrls } from './comfyBridge.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const LOCAL_COMFY_FILTERS = [
-  'http://127.0.0.1:8188/*',
-  'http://localhost:8188/*',
-  'ws://127.0.0.1:8188/*',
-  'ws://localhost:8188/*',
+const LOCAL_COMFY_HTTP_FILTERS = [
+  'http://127.0.0.1:*/*',
+  'http://localhost:*/*',
+  'http://[::1]:*/*',
+  'http://192.168.*/*',
+  'http://10.*/*',
+];
+
+const LOCAL_COMFY_ALL_FILTERS = [
+  ...LOCAL_COMFY_HTTP_FILTERS,
+  'ws://127.0.0.1:*/*',
+  'ws://localhost:*/*',
+  'ws://[::1]:*/*',
+  'ws://192.168.*/*',
+  'ws://10.*/*',
 ];
 
 const modelDownloadManager = new ModelDownloadManager();
@@ -21,23 +32,30 @@ let updaterRegistered = false;
 
 /**
  * Configures Electron session headers so the packaged React UI (loaded via file://)
- * can directly communicate with a local ComfyUI server at http://127.0.0.1:8188
- * without Origin or CORS rejections.
+ * can directly stream videos, open WebSockets, and send requests to a local/LAN ComfyUI
+ * server on any port (8188 Portable, 8000 Desktop, etc.) without Origin, CORS, or
+ * Chromium Private Network Access rejections.
  */
 function configureLocalComfyAccess() {
   const defaultSession = session.defaultSession;
 
   defaultSession.webRequest.onBeforeSendHeaders(
-    { urls: LOCAL_COMFY_FILTERS },
+    { urls: LOCAL_COMFY_ALL_FILTERS },
     (details, callback) => {
       const requestHeaders = { ...details.requestHeaders };
-      requestHeaders.Origin = 'http://127.0.0.1:8188';
+      try {
+        const parsed = new URL(details.url);
+        const httpProtocol = parsed.protocol === 'wss:' ? 'https:' : 'http:';
+        requestHeaders.Origin = `${httpProtocol}//${parsed.host}`;
+      } catch {
+        requestHeaders.Origin = 'http://127.0.0.1:8188';
+      }
       callback({ requestHeaders });
     },
   );
 
   defaultSession.webRequest.onHeadersReceived(
-    { urls: ['http://127.0.0.1:8188/*', 'http://localhost:8188/*'] },
+    { urls: LOCAL_COMFY_HTTP_FILTERS },
     (details, callback) => {
       const headers = { ...(details.responseHeaders ?? {}) };
 
@@ -47,7 +65,8 @@ function configureLocalComfyAccess() {
         if (
           lower === 'access-control-allow-origin' ||
           lower === 'access-control-allow-methods' ||
-          lower === 'access-control-allow-headers'
+          lower === 'access-control-allow-headers' ||
+          lower === 'access-control-allow-private-network'
         ) {
           delete headers[key];
         }
@@ -56,8 +75,16 @@ function configureLocalComfyAccess() {
       headers['Access-Control-Allow-Origin'] = ['*'];
       headers['Access-Control-Allow-Methods'] = ['GET, POST, PUT, DELETE, OPTIONS'];
       headers['Access-Control-Allow-Headers'] = ['*'];
+      headers['Access-Control-Allow-Private-Network'] = ['true'];
 
-      callback({ responseHeaders: headers });
+      const responseUpdate = { responseHeaders: headers };
+      // If ComfyUI was started without --enable-cors-header "*", OPTIONS preflights return 405;
+      // rewrite to 204 so Chromium allows the follow-up request cleanly.
+      if (details.method === 'OPTIONS' && details.statusCode >= 400) {
+        responseUpdate.statusLine = 'HTTP/1.1 204 No Content';
+      }
+
+      callback(responseUpdate);
     },
   );
 }
@@ -72,6 +99,15 @@ function registerModelManagerIpc() {
         win.webContents.send('models:progress', event);
       }
     }
+  });
+
+  ipcMain.handle('comfy:request', async (_event, options) => {
+    return performComfyRequest(options);
+  });
+
+  ipcMain.handle('comfy:probe', async (_event, payload) => {
+    const { excludeBaseUrl, candidatePorts } = payload ?? {};
+    return probeLocalComfyUrls(excludeBaseUrl, candidatePorts);
   });
 
   ipcMain.handle('models:select-dir', async () => {

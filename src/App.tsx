@@ -233,6 +233,9 @@ export default function App() {
   const handleCheckConnection = useCallback(async () => {
     setConnection({ status: 'checking', message: 'Подключение к серверу ComfyUI...' });
     const result = await checkConnection(settings.serverUrl);
+    if (result.detectedUrl && result.detectedUrl !== settings.serverUrl) {
+      setSettings((prev) => ({ ...prev, serverUrl: result.detectedUrl! }));
+    }
     setConnection(result);
   }, [settings.serverUrl]);
 
