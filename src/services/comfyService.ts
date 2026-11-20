@@ -2,6 +2,7 @@ import workflowT2VTemplate from '../../workflow_t2v.json';
 import workflowI2VTemplate from '../../workflow_i2v.json';
 import { extractLastFrameFromVideo } from '../utils/videoFrameUtils';
 import { PreflightError, runPreflight } from './preflightService';
+import type { VideoExportBackend } from './preflightService';
 import { buildSegmentPrompt } from './storyboard';
 import type { CameraPresetId, StoryboardShot } from './storyboard';
 import type {
@@ -210,6 +211,7 @@ export interface WorkflowBuildInput {
   filenamePrefix?: string;
   segmentIndex?: number;
   isContinuation?: boolean;
+  videoExportBackend?: VideoExportBackend;
 }
 
 export interface AutoModelRouteDecision {
@@ -591,9 +593,41 @@ export function buildWorkflowFromTemplate(
     delete graph['58'];
   }
 
-  if (graph['60']) {
+  const outputFps = computeOutputFps(input.settings.fps, input.settings.rifeEnabled);
+  const resolvedPrefix =
+    input.filenamePrefix ||
+    (typeof graph['60']?.inputs?.filename_prefix === 'string'
+      ? graph['60'].inputs.filename_prefix
+      : mode === 'i2v'
+        ? 'kinoflow_i2v_seg'
+        : 'kinoflow_t2v_seg');
+
+  if (input.videoExportBackend === 'core') {
+    graph['60'] = {
+      class_type: 'CreateVideo',
+      inputs: {
+        images: currentImageLink,
+        fps: outputFps,
+      },
+      _meta: {
+        title: 'Create Video (ComfyUI Core)',
+      },
+    };
+    graph['61'] = {
+      class_type: 'SaveVideo',
+      inputs: {
+        video: ['60', 0],
+        filename_prefix: resolvedPrefix,
+        format: 'mp4',
+        codec: 'h264',
+      },
+      _meta: {
+        title: 'Save MP4 Video (ComfyUI Core)',
+      },
+    };
+  } else if (graph['60']) {
     graph['60'].inputs.images = currentImageLink;
-    graph['60'].inputs.frame_rate = computeOutputFps(input.settings.fps, input.settings.rifeEnabled);
+    graph['60'].inputs.frame_rate = outputFps;
     if (input.filenamePrefix) {
       graph['60'].inputs.filename_prefix = input.filenamePrefix;
     }
@@ -1488,6 +1522,7 @@ export async function runComfyGeneration(
   if (preflightReport && !preflightReport.ok) {
     throw new PreflightError(preflightReport);
   }
+  const videoExportBackend: VideoExportBackend = preflightReport?.videoExportBackend ?? 'vhs';
 
   const uploadedChars: WorkflowBuildCharacter[] = [];
 
@@ -1591,6 +1626,7 @@ export async function runComfyGeneration(
       filenamePrefix: `kinoflow_seg${segment.index}_${route.workflowMode}`,
       segmentIndex: segment.index,
       isContinuation,
+      videoExportBackend,
     });
 
     const segStartPct = baseProgressOffset + (segment.index - 1) * perSegmentBudget;

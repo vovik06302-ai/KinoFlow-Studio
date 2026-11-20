@@ -59,10 +59,14 @@ export interface MissingFile {
   catalogName?: string;
 }
 
+export type VideoExportBackend = 'vhs' | 'core';
+
 export interface PreflightReport {
   ok: boolean;
   missingNodes: MissingNode[];
   missingFiles: MissingFile[];
+  /** Set to 'core' when VHS_VideoCombine is absent but ComfyUI's built-in CreateVideo + SaveVideo nodes are installed. */
+  videoExportBackend?: VideoExportBackend;
 }
 
 export class PreflightError extends Error {
@@ -108,6 +112,12 @@ export function collectGraphClassTypes(graphs: GraphLike[]): string[] {
       if (node?.class_type) classTypes.add(node.class_type);
     }
   }
+  // When a graph uses VHS_VideoCombine, also probe ComfyUI's built-in CreateVideo + SaveVideo nodes
+  // so stock ComfyUI installs work without requiring ComfyUI-VideoHelperSuite.
+  if (classTypes.has('VHS_VideoCombine')) {
+    classTypes.add('CreateVideo');
+    classTypes.add('SaveVideo');
+  }
   return [...classTypes];
 }
 
@@ -118,10 +128,17 @@ export function analyzePreflight(
   const missingNodeMap = new Map<string, Set<string>>();
   const missingFiles: MissingFile[] = [];
   const seenFiles = new Set<string>();
+  const canUseCoreVideoExport =
+    !objectInfo.VHS_VideoCombine && Boolean(objectInfo.CreateVideo && objectInfo.SaveVideo);
+  let usesCoreVideoFallback = false;
 
   for (const graph of graphs) {
     for (const [nodeId, node] of Object.entries(graph)) {
       if (!node?.class_type) continue;
+      if (node.class_type === 'VHS_VideoCombine' && canUseCoreVideoExport) {
+        usesCoreVideoFallback = true;
+        continue;
+      }
       const info = objectInfo[node.class_type];
 
       if (!info) {
@@ -163,11 +180,15 @@ export function analyzePreflight(
     url: NODE_PACK_HINTS[classType]?.url,
   }));
 
-  return {
+  const report: PreflightReport = {
     ok: missingNodes.length === 0 && missingFiles.length === 0,
     missingNodes,
     missingFiles,
   };
+  if (usesCoreVideoFallback) {
+    report.videoExportBackend = 'core';
+  }
+  return report;
 }
 
 export function formatPreflightReport(report: PreflightReport): string {

@@ -655,7 +655,9 @@ export function PreviewAndHistoryPanel({
                             <span className="font-mono">{node.classType}</span>
                             {node.pack ? (
                               <>
-                                {' — установите '}
+                                {node.classType === 'VHS_VideoCombine'
+                                  ? ' — обновите ComfyUI (для встроенных CreateVideo/SaveVideo) или установите '
+                                  : ' — установите '}
                                 <a
                                   href={node.url}
                                   target="_blank"

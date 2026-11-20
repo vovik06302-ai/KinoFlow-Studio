@@ -457,3 +457,25 @@ test('createComfyFetch routes GET requests through the Electron bridge and maps 
     delete (globalThis as unknown as { window?: unknown }).window;
   }
 });
+
+test('buildWorkflowFromTemplate swaps VHS_VideoCombine for built-in CreateVideo + SaveVideo when videoExportBackend is core', () => {
+  const graph = buildWorkflowFromTemplate({
+    settings: { ...baseSettings, mode: 'i2v', fps: 16, rifeEnabled: true },
+    positivePrompt: 'A gentle breeze moves coastal grass.',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    startFrameFilename: 'kinoflow_start/coast.png',
+    characters: [],
+    filenamePrefix: 'kinoflow_seg1_i2v',
+    videoExportBackend: 'core',
+  });
+
+  assert.equal(graph['60'].class_type, 'CreateVideo');
+  assert.deepEqual(graph['60'].inputs.images, ['58', 0]);
+  assert.equal(graph['60'].inputs.fps, 32);
+  assert.equal(graph['61'].class_type, 'SaveVideo');
+  assert.deepEqual(graph['61'].inputs.video, ['60', 0]);
+  assert.equal(graph['61'].inputs.filename_prefix, 'kinoflow_seg1_i2v');
+  assert.equal(graph['61'].inputs.format, 'mp4');
+  assert.equal(graph['61'].inputs.codec, 'h264');
+});
+

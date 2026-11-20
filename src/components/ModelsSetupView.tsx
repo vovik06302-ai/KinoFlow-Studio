@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
+  Check,
   CheckCircle2,
+  Copy,
   Download,
   ExternalLink,
   FolderOpen,
@@ -29,8 +31,11 @@ import type { ModelDownloadProgressEvent, ScannedModelItem } from '../types/mode
 
 interface ModelsSetupViewProps {
   comfyDir: string;
+  requiredModelIds?: string[];
   onComfyDirChange: (nextDir: string) => void;
 }
+
+const VHS_CLONE_CMD = 'git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git';
 
 function createInitialModels(): ScannedModelItem[] {
   return REQUIRED_MODELS.map((m) => ({
@@ -42,8 +47,13 @@ function createInitialModels(): ScannedModelItem[] {
   }));
 }
 
-export function ModelsSetupView({ comfyDir, onComfyDirChange }: ModelsSetupViewProps) {
+export function ModelsSetupView({
+  comfyDir,
+  requiredModelIds = [],
+  onComfyDirChange,
+}: ModelsSetupViewProps) {
   const [dirInput, setDirInput] = useState(comfyDir || DEFAULT_COMFY_DIR);
+  const [copiedVhs, setCopiedVhs] = useState(false);
   const [models, setModels] = useState<ScannedModelItem[]>(createInitialModels);
   const [directoryExists, setDirectoryExists] = useState<boolean | null>(null);
   const [isScanning, setIsScanning] = useState(false);
@@ -224,10 +234,17 @@ export function ModelsSetupView({ comfyDir, onComfyDirChange }: ModelsSetupViewP
     await cancelModelsDownload(modelId);
   };
 
+  const requiredSet = useMemo(() => new Set(requiredModelIds), [requiredModelIds]);
+
   const summary = useMemo(() => {
     const installedCount = models.filter((m) => m.status === 'installed').length;
     const missingModels = models.filter((m) => m.status !== 'installed');
+    const requiredMissingModels = missingModels.filter((m) => requiredSet.has(m.id));
     const remainingBytes = missingModels.reduce(
+      (sum, m) => sum + Math.max(0, m.expectedSizeBytes - m.partialSizeBytes),
+      0,
+    );
+    const requiredRemainingBytes = requiredMissingModels.reduce(
       (sum, m) => sum + Math.max(0, m.expectedSizeBytes - m.partialSizeBytes),
       0,
     );
@@ -236,8 +253,20 @@ export function ModelsSetupView({ comfyDir, onComfyDirChange }: ModelsSetupViewP
       installedCount,
       missingCount: missingModels.length,
       remainingBytes,
+      requiredMissingIds: requiredMissingModels.map((m) => m.id),
+      requiredRemainingBytes,
     };
-  }, [models]);
+  }, [models, requiredSet]);
+
+  const handleCopyVhsCmd = async () => {
+    try {
+      await navigator.clipboard.writeText(VHS_CLONE_CMD);
+      setCopiedVhs(true);
+      window.setTimeout(() => setCopiedVhs(false), 1600);
+    } catch {
+      // Ignore clipboard failures
+    }
+  };
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
@@ -266,19 +295,41 @@ export function ModelsSetupView({ comfyDir, onComfyDirChange }: ModelsSetupViewP
               <span>Остановить загрузку</span>
             </button>
           ) : (
-            <button
-              type="button"
-              disabled={summary.missingCount === 0 || !dirInput.trim() || isScanning}
-              onClick={() => void handleStartDownload()}
-              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md bg-[#E58E26] px-4 py-2 text-xs font-semibold text-[#0B0D11] transition-colors hover:bg-[#EE9B38] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E58E26] disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              <HardDriveDownload className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>
-                {summary.missingCount === 0
-                  ? 'Все модели установлены'
-                  : `Скачать все недостающие модели (${summary.missingCount})`}
-              </span>
-            </button>
+            <>
+              {summary.requiredMissingIds.length > 0 &&
+                summary.requiredMissingIds.length < summary.missingCount && (
+                  <button
+                    type="button"
+                    disabled={!dirInput.trim() || isScanning}
+                    onClick={() => void handleStartDownload(summary.requiredMissingIds)}
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md bg-[#E58E26] px-4 py-2 text-xs font-semibold text-[#0B0D11] transition-colors hover:bg-[#EE9B38] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E58E26] disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    <HardDriveDownload className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>
+                      Скачать нужные для сцены ({summary.requiredMissingIds.length} ·{' '}
+                      {formatBytes(summary.requiredRemainingBytes)})
+                    </span>
+                  </button>
+                )}
+              <button
+                type="button"
+                disabled={summary.missingCount === 0 || !dirInput.trim() || isScanning}
+                onClick={() => void handleStartDownload()}
+                className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-4 py-2 text-xs font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E58E26] disabled:cursor-not-allowed disabled:opacity-45 ${
+                  summary.requiredMissingIds.length > 0 &&
+                  summary.requiredMissingIds.length < summary.missingCount
+                    ? 'border border-[#2B3242] bg-[#1A1F2B] text-[#E2E8F0] hover:border-[#3A4358] hover:bg-[#222838]'
+                    : 'bg-[#E58E26] text-[#0B0D11] hover:bg-[#EE9B38]'
+                }`}
+              >
+                <HardDriveDownload className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>
+                  {summary.missingCount === 0
+                    ? 'Все модели установлены'
+                    : `Скачать все недостающие модели (${summary.missingCount})`}
+                </span>
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -367,7 +418,7 @@ export function ModelsSetupView({ comfyDir, onComfyDirChange }: ModelsSetupViewP
             {directoryExists === true
               ? 'Папка ComfyUI найдена · выполняется точная проверка файлов по размеру (байт-в-байт)'
               : directoryExists === false
-                ? 'Указанная папка ещё не существует — недостающие подпапки models/* будут созданы при загрузке'
+                ? 'Указанная папка ещё не существует — укажите путь к Portable (C:\\ComfyUI_windows_portable\\ComfyUI) или Desktop (Documents\\ComfyUI)'
                 : 'Укажите корневую папку ComfyUI (внутри которой находится каталог models/)'}
           </span>
           <span className="font-mono text-[#94A3B8]">
@@ -449,8 +500,13 @@ export function ModelsSetupView({ comfyDir, onComfyDirChange }: ModelsSetupViewP
                 ? Number(((model.partialSizeBytes / model.expectedSizeBytes) * 100).toFixed(1))
                 : 0;
 
+            const isRequiredForCurrent = requiredSet.has(model.id) && !isInstalled;
+
             return (
-              <li key={model.id} className="px-4 py-4 sm:px-5">
+              <li
+                key={model.id}
+                className={`px-4 py-4 sm:px-5 ${isRequiredForCurrent ? 'bg-[#171B26]' : ''}`}
+              >
                 <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
                   {/* Left: Name, description, subfolder, HF link */}
                   <div className="min-w-0 flex-1 space-y-1.5">
@@ -462,6 +518,16 @@ export function ModelsSetupView({ comfyDir, onComfyDirChange }: ModelsSetupViewP
                       <span className="font-mono text-[11px] text-[#94A3B8]">
                         {model.category}
                       </span>
+                      {isRequiredForCurrent && (
+                        <>
+                          <span className="font-mono text-[11px] text-[#64748B]" aria-hidden="true">
+                            ·
+                          </span>
+                          <span className="text-[11px] font-medium text-[#F6AD55]">
+                            Требуется для текущей генерации
+                          </span>
+                        </>
+                      )}
                     </div>
 
                     <p className="text-xs leading-relaxed text-[#94A3B8]">{model.description}</p>
@@ -598,6 +664,60 @@ export function ModelsSetupView({ comfyDir, onComfyDirChange }: ModelsSetupViewP
             );
           })}
         </ul>
+      </section>
+
+      {/* ComfyUI Video Export Nodes Info */}
+      <section
+        aria-labelledby="comfy-nodes-heading"
+        className="mt-6 rounded-lg border border-[#222734] bg-[#10141C] p-4 sm:p-5"
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <h2
+              id="comfy-nodes-heading"
+              className="text-sm font-semibold tracking-tight text-[#F1F5F9]"
+            >
+              Ноды ComfyUI для экспорта MP4
+            </h2>
+            <p className="text-xs leading-relaxed text-[#94A3B8]">
+              Свежие сборки ComfyUI (Portable / Desktop) поддерживают экспорт видео через
+              встроенные ноды{' '}
+              <span className="font-mono text-[#CBD5E1]">CreateVideo</span> и{' '}
+              <span className="font-mono text-[#CBD5E1]">SaveVideo</span> — KinoFlow Studio
+              переключается на них автоматически, если{' '}
+              <span className="font-mono text-[#CBD5E1]">VHS_VideoCombine</span> не установлен.
+              Если вы используете более старую версию ComfyUI, установите пакет{' '}
+              <a
+                href="https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-[#F6AD55] hover:text-[#FBD38D]"
+              >
+                <span>ComfyUI-VideoHelperSuite</span>
+                <ExternalLink className="h-3 w-3" aria-hidden="true" />
+              </a>{' '}
+              в папку <span className="font-mono text-[#CBD5E1]">custom_nodes/</span> и
+              перезапустите ComfyUI.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => void handleCopyVhsCmd()}
+            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-[#2B3242] bg-[#1A1F2B] px-3 py-1.5 text-xs font-medium text-[#E2E8F0] transition-colors hover:bg-[#222838]"
+          >
+            {copiedVhs ? (
+              <Check className="h-3.5 w-3.5 text-[#22C55E]" aria-hidden="true" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+            <span>{copiedVhs ? 'Скопировано' : 'Копировать git clone'}</span>
+          </button>
+        </div>
+
+        <pre className="mt-3 overflow-x-auto rounded-md border border-[#1E2330] bg-[#0B0D11] px-3 py-2 font-mono text-[11px] text-[#CBD5E1]">
+          <code>{VHS_CLONE_CMD}</code>
+        </pre>
       </section>
     </div>
   );

@@ -1024,6 +1024,17 @@ export default function App() {
         {activeTab === 'models' && (
           <ModelsSetupView
             comfyDir={settings.comfyDir}
+            requiredModelIds={
+              preflightReport
+                ? Array.from(
+                    new Set(
+                      preflightReport.missingFiles
+                        .map((file) => file.catalogModelId)
+                        .filter((id): id is string => Boolean(id)),
+                    ),
+                  )
+                : []
+            }
             onComfyDirChange={(nextDir) => handleSettingsChange({ comfyDir: nextDir })}
           />
         )}

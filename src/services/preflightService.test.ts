@@ -153,3 +153,33 @@ test('runPreflight queries /object_info per node class and never blocks when the
     throw new PreflightError(report2!);
   }, /VHS_VideoCombine/);
 });
+
+test('analyzePreflight falls back to built-in CreateVideo + SaveVideo when VHS_VideoCombine is missing', async () => {
+  const graphs = buildPreflightGraphs({
+    settings: { ...settings, durationSec: 5 },
+    hasStartFrame: false,
+    isContinuation: false,
+  });
+  const info = fullObjectInfo({ CreateVideo: {}, SaveVideo: {} });
+  delete info.VHS_VideoCombine;
+
+  const report = analyzePreflight(graphs, info);
+  assert.equal(report.ok, true);
+  assert.deepEqual(report.missingNodes, []);
+  assert.equal(report.videoExportBackend, 'core');
+
+  const queried: string[] = [];
+  const coreOnlyFetch = (async (url: string) => {
+    const name = decodeURIComponent(url.split('/object_info/')[1]);
+    queried.push(name);
+    const data = info[name] ? { [name]: info[name] } : {};
+    return new Response(JSON.stringify(data), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const liveReport = await runPreflight('http://127.0.0.1:8188', graphs, coreOnlyFetch);
+  assert.ok(queried.includes('CreateVideo'));
+  assert.ok(queried.includes('SaveVideo'));
+  assert.equal(liveReport?.ok, true);
+  assert.equal(liveReport?.videoExportBackend, 'core');
+});
+
