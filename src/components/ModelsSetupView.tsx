@@ -277,8 +277,8 @@ export function ModelsSetupView({
             Модели и установка
           </h1>
           <p className="mt-1.5 max-w-2xl text-xs leading-relaxed text-[#94A3B8]">
-            Автоматическая проверка и загрузка обязательных весов Wan 2.2 FP8, UMT5-XXL, VAE и
-            CLIP Vision из официальных репозиториев{' '}
+            Автоматическая проверка и загрузка обязательных весов Wan 2.2 FP8, UMT5-XXL и Video VAE
+            из официальных репозиториев{' '}
             <span className="font-mono text-[#CBD5E1]">Comfy-Org</span> на Hugging Face с
             поддержкой докачки при обрыве связи.
           </p>
@@ -416,7 +416,7 @@ export function ModelsSetupView({
         <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#64748B]">
           <span>
             {directoryExists === true
-              ? 'Папка ComfyUI найдена · выполняется точная проверка файлов по размеру (байт-в-байт)'
+              ? 'Папка ComfyUI найдена · выполняется проверка наличия и целостности файлов моделей'
               : directoryExists === false
                 ? 'Указанная папка ещё не существует — укажите путь к Portable (C:\\ComfyUI_windows_portable\\ComfyUI) или Desktop (Documents\\ComfyUI)'
                 : 'Укажите корневую папку ComfyUI (внутри которой находится каталог models/)'}

@@ -16,7 +16,35 @@
     },
     "_meta": {
       "title": "Wan 2.2 I2V Low-Noise MoE Expert",
-      "comment": "Второй эксперт I2V MoE для финальной детализации (удаляется для одноступенчатых моделей)."
+      "comment": "Второй эксперт I2V MoE для финальной детализации (удаляется для одноступенчатой модели Wan 2.2 TI2V-5B)."
+    }
+  },
+  "101": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "shift": 5.0
+    },
+    "_meta": {
+      "title": "Wan 2.2 I2V Flow Shift (High-Noise, shift=5.0)",
+      "comment": "Официальный сдвиг расписания шума для Wan 2.2 I2V (ModelSamplingSD3 shift=5.0)."
+    }
+  },
+  "102": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "shift": 5.0
+    },
+    "_meta": {
+      "title": "Wan 2.2 I2V Flow Shift (Low-Noise, shift=5.0)",
+      "comment": "Официальный сдвиг расписания шума для второго эксперта Wan 2.2 I2V MoE (удаляется для TI2V-5B)."
     }
   },
   "3": {
@@ -76,35 +104,7 @@
     },
     "_meta": {
       "title": "Start Frame Image (I2V / Chained Segment Anchor)",
-      "comment": "СЮДА ПОДСТАВЛЯЕТСЯ стартовый кадр (либо фото пользователя, либо автоматически извлечённый последний кадр предыдущего 5-секундного сегмента)."
-    }
-  },
-  "8": {
-    "class_type": "CLIPVisionEncode",
-    "inputs": {
-      "clip_vision": [
-        "15",
-        0
-      ],
-      "image": [
-        "7",
-        0
-      ],
-      "crop": "none"
-    },
-    "_meta": {
-      "title": "CLIP Vision Encode (Start Frame Conditioning)",
-      "comment": "Фиксирует свет, композицию и позу на стыке 5-секундных сегментов."
-    }
-  },
-  "15": {
-    "class_type": "CLIPVisionLoader",
-    "inputs": {
-      "clip_name": "clip_vision_h.safetensors"
-    },
-    "_meta": {
-      "title": "CLIP Vision Encoder (Start Frame & Character Identity)",
-      "comment": "Используется одновременно для стартового кадра (нода 8) и для IP-Adapter / FaceID персонажей (ноды 20–22)."
+      "comment": "СЮДА ПОДСТАВЛЯЕТСЯ стартовый кадр из корневой папки input ComfyUI (фото пользователя или последний кадр предыдущего сегмента)."
     }
   },
   "30": {
@@ -122,10 +122,6 @@
         "4",
         0
       ],
-      "clip_vision_output": [
-        "8",
-        0
-      ],
       "start_image": [
         "7",
         0
@@ -137,14 +133,14 @@
     },
     "_meta": {
       "title": "Image-to-Video Conditioning & Segment Latent",
-      "comment": "Объединяет стартовый кадр (#7), CLIP Vision (#8) и промпты в латент 5-секундного сегмента."
+      "comment": "Объединяет стартовый кадр (#7), VAE (#4) и промпты в латент 5-секундного сегмента Wan 2.2 (без CLIP Vision)."
     }
   },
   "40": {
     "class_type": "KSamplerAdvanced",
     "inputs": {
       "model": [
-        "1",
+        "101",
         0
       ],
       "positive": [
@@ -178,7 +174,7 @@
     "class_type": "KSamplerAdvanced",
     "inputs": {
       "model": [
-        "2",
+        "102",
         0
       ],
       "positive": [

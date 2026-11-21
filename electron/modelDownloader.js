@@ -324,9 +324,10 @@ export class ModelDownloadManager {
     const { targetDir, finalPath, partPath } = resolveModelPaths(comfyDir, model);
     await fsp.mkdir(targetDir, { recursive: true });
 
-    // Already installed and exact size matches?
+    // Already installed and passes size check?
     const existingSize = await safeFileSize(finalPath);
-    if (existingSize !== null && existingSize === model.expectedSizeBytes) {
+    const existingStatus = evaluateModelFileStatus(model.expectedSizeBytes, existingSize, 0);
+    if (existingStatus === 'installed' && existingSize !== null) {
       this.emit({
         type: 'model-progress',
         modelId: model.id,
@@ -340,8 +341,8 @@ export class ModelDownloadManager {
       return;
     }
 
-    // If a corrupted/mismatched final file exists, remove it so the fresh download replaces it cleanly
-    if (existingSize !== null && existingSize !== model.expectedSizeBytes) {
+    // If a corrupted/truncated final file exists, remove it so the fresh download replaces it cleanly
+    if (existingStatus === 'size_mismatch' && existingSize !== null) {
       await fsp.unlink(finalPath).catch(() => {});
     }
 

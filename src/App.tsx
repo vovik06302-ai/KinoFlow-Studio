@@ -19,11 +19,15 @@ import {
   RIFE_FPS_CHOICES,
   SEGMENT_DURATION_SEC,
   SHOOTING_STYLES,
+  VIDEO_MODELS,
+  applyShootingStyleToPrompt,
   checkConnection,
   computeOutputFps,
   describeAutoRoutingStatus,
+  formatGenerationErrorMessage,
   getModelOption,
   getShootingStyleOption,
+  isElectronComfyBridgeAvailable,
   resolveAutoModelRoute,
   runComfyGeneration,
   secondsToAlignedFrames,
@@ -44,6 +48,7 @@ import type { PreflightReport } from './services/preflightService';
 import { enhanceScenePrompt } from './services/promptService';
 import { extractLastFrameFromVideo } from './utils/videoFrameUtils';
 import type {
+  BaseModelId,
   CharacterReference,
   ConnectionInfo,
   DurationChoice,
@@ -89,6 +94,9 @@ function getInitialSettings(): GenerationSettings {
   if (!saved) return defaults;
 
   const validMode: GenerationMode = saved.mode === 'i2v' ? 'i2v' : 't2v';
+  const validModelId: BaseModelId = VIDEO_MODELS.some((m) => m.id === saved.modelId)
+    ? (saved.modelId as BaseModelId)
+    : 'auto';
   const validDuration: DurationChoice = DURATION_CHOICES.includes(
     saved.durationSec as DurationChoice,
   )
@@ -114,6 +122,7 @@ function getInitialSettings(): GenerationSettings {
         ? saved.comfyDir.trim()
         : DEFAULT_COMFY_DIR,
     mode: validMode,
+    modelId: validModelId,
     durationSec: validDuration,
     fps: validFps,
     frames: secondsToAlignedFrames(SEGMENT_DURATION_SEC, validFps),
@@ -295,43 +304,48 @@ export default function App() {
     setGenerationError(null);
   }, []);
 
-  const handleEnhancePrompt = useCallback(async () => {
-    const trimmed = prompt.trim();
-    if (!trimmed) {
-      setEnhanceError('Введите описание сцены перед улучшением промпта.');
-      return;
-    }
-
-    setIsEnhancing(true);
-    setEnhanceError(null);
-
-    try {
-      const modelOption = getModelOption(settings.modelId);
-      const styleOption = getShootingStyleOption(settings.shootingStyle);
-      const enhanced = await enhanceScenePrompt({
-        prompt: trimmed,
-        model: `${modelOption.label} (${settings.mode === 'i2v' ? 'Image-to-Video' : 'Text-to-Video'})`,
-        characters: characters.map((c) => ({ name: c.name, weight: c.weight })),
-        durationSec: settings.durationSec,
-        resolution: settings.upscale1080p
-          ? `${settings.width}x${settings.height} (1080p cinema upscale)`
-          : `${settings.width}x${settings.height}`,
-        shootingStyleLabel: styleOption.label,
-        shootingStyleCue: styleOption.promptCue,
-      });
-
-      if (originalPromptBeforeEnhance === null) {
-        setOriginalPromptBeforeEnhance(trimmed);
+  const handleEnhancePrompt = useCallback(
+    async (options?: { cameraMovement?: string; lightingPreset?: string }) => {
+      const trimmed = prompt.trim();
+      if (!trimmed) {
+        setEnhanceError('Введите описание сцены перед улучшением промпта.');
+        return;
       }
-      setPrompt(enhanced);
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Ошибка обращения к сервису улучшения промптов.';
-      setEnhanceError(message);
-    } finally {
-      setIsEnhancing(false);
-    }
-  }, [prompt, settings, characters, originalPromptBeforeEnhance]);
+
+      setIsEnhancing(true);
+      setEnhanceError(null);
+
+      try {
+        const modelOption = getModelOption(settings.modelId);
+        const styleOption = getShootingStyleOption(settings.shootingStyle);
+        const enhanced = await enhanceScenePrompt({
+          prompt: trimmed,
+          model: `${modelOption.label} (${settings.mode === 'i2v' ? 'Image-to-Video' : 'Text-to-Video'})`,
+          characters: characters.map((c) => ({ name: c.name, weight: c.weight })),
+          durationSec: settings.durationSec,
+          resolution: settings.upscale1080p
+            ? `${settings.width}x${settings.height} (1080p cinema upscale)`
+            : `${settings.width}x${settings.height}`,
+          shootingStyleLabel: styleOption.label,
+          shootingStyleCue: styleOption.promptCue,
+          cameraMovement: options?.cameraMovement,
+          lightingPreset: options?.lightingPreset,
+        });
+
+        if (originalPromptBeforeEnhance === null) {
+          setOriginalPromptBeforeEnhance(trimmed);
+        }
+        setPrompt(enhanced);
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Ошибка обращения к сервису улучшения промптов.';
+        setEnhanceError(message);
+      } finally {
+        setIsEnhancing(false);
+      }
+    },
+    [prompt, settings, characters, originalPromptBeforeEnhance],
+  );
 
   const handleRevertEnhancedPrompt = useCallback(() => {
     if (originalPromptBeforeEnhance !== null) {
@@ -484,9 +498,15 @@ export default function App() {
               }))
           : [];
 
+      const effectivePositivePrompt = applyShootingStyleToPrompt(
+        activePrompt,
+        runSettings.shootingStyle,
+        originalPromptBeforeEnhance !== null,
+      );
+
       const result = await runComfyGeneration({
         settings: runSettings,
-        positivePrompt: activePrompt,
+        positivePrompt: effectivePositivePrompt,
         negativePrompt,
         characters,
         storyboard:
@@ -600,7 +620,15 @@ export default function App() {
         setGenerationError('Проверка перед запуском нашла, чего не хватает в ComfyUI.');
       } else if (!isCancelled) {
         setGenerationError(
-          `${msg} Проверьте, что ComfyUI запущен на ${runSettings.serverUrl} с флагом --enable-cors-header "*".`,
+          formatGenerationErrorMessage({
+            message: msg,
+            serverUrl: runSettings.serverUrl,
+            isElectron: isElectronComfyBridgeAvailable(),
+            pageProtocol:
+              typeof window !== 'undefined' && window.location
+                ? window.location.protocol
+                : undefined,
+          }),
         );
       }
     } finally {
@@ -682,11 +710,15 @@ export default function App() {
       ? (item.shootingStyle as ShootingStyleId)
       : 'arri-35mm';
 
+    const validModelId: BaseModelId = VIDEO_MODELS.some((m) => m.id === item.modelId)
+      ? item.modelId
+      : 'auto';
+
     setSettings((prev) => ({
       ...prev,
       serverUrl: item.serverUrl || prev.serverUrl,
       mode: item.mode || 't2v',
-      modelId: item.modelId,
+      modelId: validModelId,
       width: item.width,
       height: item.height,
       resolutionId: `${item.width}x${item.height}`,
@@ -970,7 +1002,7 @@ export default function App() {
                   disabled={isGenerating}
                   onPromptChange={handlePromptChange}
                   onNegativePromptChange={setNegativePrompt}
-                  onEnhancePrompt={() => void handleEnhancePrompt()}
+                  onEnhancePrompt={(opts) => void handleEnhancePrompt(opts)}
                   onRevertEnhancedPrompt={handleRevertEnhancedPrompt}
                 />
 

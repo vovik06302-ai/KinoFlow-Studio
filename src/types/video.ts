@@ -23,14 +23,13 @@ export type BaseModelId =
   | 'auto'
   | 'wan22-t2v-a14b-q4'
   | 'wan22-t2v-a14b-q5'
-  | 'wan22-ti2v-5b-fp8'
-  | 'cogvideox-15-5b-fp8';
+  | 'wan22-ti2v-5b-fp8';
 
 export interface VideoModelOption {
   id: BaseModelId;
   label: string;
   shortLabel: string;
-  architecture: 'wan22-moe' | 'wan22-dense' | 'cogvideox';
+  architecture: 'wan22-moe' | 'wan22-dense';
   highNoiseFile: string;
   lowNoiseFile: string;
   i2vHighNoiseFile: string;

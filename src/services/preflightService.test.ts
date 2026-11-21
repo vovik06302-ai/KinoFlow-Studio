@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   PreflightError,
   analyzePreflight,
+  buildModelResolutionKey,
   extractComboOptions,
   formatPreflightReport,
   runPreflight,
@@ -48,9 +49,8 @@ function fullObjectInfo(overrides: Record<string, unknown> = {}): Record<string,
     },
     CLIPLoader: { input: { required: { clip_name: combo('umt5_xxl_fp8_e4m3fn_scaled.safetensors') } } },
     VAELoader: { input: { required: { vae_name: combo('wan_2.1_vae.safetensors') } } },
-    CLIPVisionLoader: { input: { required: { clip_name: combo('clip_vision_h.safetensors') } } },
+    ModelSamplingSD3: {},
     CLIPTextEncode: {},
-    CLIPVisionEncode: {},
     LoadImage: {},
     WanImageToVideo: {},
     EmptyHunyuanLatentVideo: {},
@@ -118,6 +118,12 @@ test('analyzePreflight matches files installed in sub-folders and reports GGUF f
   const report = analyzePreflight(graphs, info);
   const names = report.missingFiles.map((f) => f.value);
   assert.ok(!names.includes('wan2.2_t2v_high_noise_14B_Q4_K_M.gguf'), 'sub-folder install must match');
+  assert.equal(
+    report.resolvedModelNames?.[
+      buildModelResolutionKey('UnetLoaderGGUF', 'unet_name', 'wan2.2_t2v_high_noise_14B_Q4_K_M.gguf')
+    ],
+    'wan/wan2.2_t2v_high_noise_14B_Q4_K_M.gguf',
+  );
   assert.ok(names.includes('wan2.2_t2v_low_noise_14B_Q4_K_M.gguf'));
   assert.match(formatPreflightReport(report), /GGUF-файл нужно скачать вручную/);
 });
@@ -182,4 +188,39 @@ test('analyzePreflight falls back to built-in CreateVideo + SaveVideo when VHS_V
   assert.equal(liveReport?.ok, true);
   assert.equal(liveReport?.videoExportBackend, 'core');
 });
+
+test('runPreflight tolerates HTTP 400 on unknown VHS_VideoCombine and extracts SaveVideo format/codec options', async () => {
+  const graphs = buildPreflightGraphs({
+    settings: { ...settings, durationSec: 5 },
+    hasStartFrame: false,
+    isContinuation: false,
+  });
+  const info = fullObjectInfo({
+    CreateVideo: {},
+    SaveVideo: {
+      input: {
+        required: {
+          format: combo('auto', 'mp4'),
+          codec: combo('auto'),
+        },
+      },
+    },
+  });
+  delete info.VHS_VideoCombine;
+
+  const mixedStatusFetch = (async (url: string) => {
+    const name = decodeURIComponent(url.split('/object_info/')[1]);
+    if (name === 'VHS_VideoCombine') {
+      return new Response('Unknown node', { status: 400 });
+    }
+    return new Response(JSON.stringify(info[name] ? { [name]: info[name] } : {}), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const report = await runPreflight('http://127.0.0.1:8188', graphs, mixedStatusFetch);
+  assert.equal(report?.ok, true);
+  assert.equal(report?.videoExportBackend, 'core');
+  assert.equal(report?.coreVideoFormat, 'mp4');
+  assert.equal(report?.coreVideoCodec, 'auto');
+});
+
 

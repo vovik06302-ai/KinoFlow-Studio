@@ -8,6 +8,8 @@ export interface EnhancePromptParams {
   resolution: string;
   shootingStyleLabel?: string;
   shootingStyleCue?: string;
+  cameraMovement?: string;
+  lightingPreset?: string;
 }
 
 export async function parseEnhancePromptResponse(response: Response): Promise<string> {

@@ -115,6 +115,24 @@ function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   });
 }
 
+function base64ToBlob(base64: string, mimeType: string): Blob {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mimeType });
+}
+
+interface ElectronVideoBridge {
+  request?: (options: {
+    url: string;
+    method?: string;
+    timeoutMs?: number;
+    responseType?: 'text' | 'base64';
+  }) => Promise<{ ok: boolean; bodyBase64?: string; contentType?: string }>;
+}
+
 /**
  * Extracts the final frame of a video (either from an already-loaded HTMLVideoElement
  * or from a URL) via HTML5 <canvas> and returns a PNG File + Object URL preview.
@@ -130,15 +148,39 @@ export async function extractLastFrameFromVideo(
   if (typeof source === 'string') {
     let resolvedUrl = source;
     if (!source.startsWith('blob:') && !source.startsWith('data:')) {
-      try {
-        const resp = await fetch(source, { mode: 'cors' });
-        if (resp.ok) {
-          const blob = await resp.blob();
-          resolvedUrl = URL.createObjectURL(blob);
-          blobUrlToRevoke = resolvedUrl;
+      const electronBridge =
+        typeof window !== 'undefined'
+          ? (window as unknown as { kinoflowComfy?: ElectronVideoBridge }).kinoflowComfy
+          : undefined;
+      if (electronBridge && typeof electronBridge.request === 'function') {
+        try {
+          const res = await electronBridge.request({
+            url: source,
+            method: 'GET',
+            timeoutMs: 30000,
+            responseType: 'base64',
+          });
+          if (res.ok && res.bodyBase64) {
+            const blob = base64ToBlob(res.bodyBase64, res.contentType || 'video/mp4');
+            resolvedUrl = URL.createObjectURL(blob);
+            blobUrlToRevoke = resolvedUrl;
+          }
+        } catch {
+          // Fall back to direct fetch / <video> loading
         }
-      } catch {
-        // Fall back to direct <video crossOrigin="anonymous"> loading
+      }
+
+      if (!blobUrlToRevoke) {
+        try {
+          const resp = await fetch(source, { mode: 'cors' });
+          if (resp.ok) {
+            const blob = await resp.blob();
+            resolvedUrl = URL.createObjectURL(blob);
+            blobUrlToRevoke = resolvedUrl;
+          }
+        } catch {
+          // Fall back to direct <video crossOrigin="anonymous"> loading
+        }
       }
     }
     video = await loadVideoElement(resolvedUrl);

@@ -45,13 +45,13 @@ export function WorkflowInspectorView({
       startFrameFilename:
         workflowKind === 'i2v'
           ? startFrame
-            ? `kinoflow_start/${startFrame.file.name}`
-            : 'kinoflow_chain/last_frame.png'
+            ? `kinoflow_start_${startFrame.file.name}`
+            : 'kinoflow_chain_last_frame.png'
           : undefined,
       characters: characters.map((c, idx) => ({
         name: c.name.trim() || `Персонаж ${idx + 1}`,
         weight: c.weight,
-        imageFilename: c.uploadedFilename || `kinoflow_refs/${c.file.name}`,
+        imageFilename: c.uploadedFilename || `kinoflow_ref_${c.file.name}`,
       })),
     });
 
@@ -178,29 +178,29 @@ export function WorkflowInspectorView({
       {/* Node Injection Reference Summary */}
       <div className="mb-6 grid grid-cols-1 gap-4 border-b border-[#222734] pb-6 sm:grid-cols-3">
         <div>
-          <p className="font-mono text-xs font-medium text-[#F6AD55]">Узлы 1–4, 30, 40–41</p>
+          <p className="font-mono text-xs font-medium text-[#F6AD55]">Узлы 1–4, 101–102, 40–41</p>
           <p className="mt-1 text-xs leading-relaxed text-[#94A3B8]">
-            Модель ({workflowKind === 'i2v' ? 'I2V' : 'T2V'} Wan 2.2 / CogVideoX), UMT5-XXL в RAM,
-            Video VAE и сэмплинг 5-секундных сегментов (<span className="font-mono">81 / 121</span>{' '}
-            кадров).
+            Модель Wan 2.2 ({workflowKind === 'i2v' ? 'I2V' : 'T2V'} 14B MoE / TI2V-5B), сдвиг{' '}
+            <span className="font-mono">ModelSamplingSD3</span> (shift=5.0), UMT5-XXL в RAM и
+            сэмплинг сегментов (<span className="font-mono">81 / 121</span> кадров).
           </p>
         </div>
         <div>
           <p className="font-mono text-xs font-medium text-[#F6AD55]">
-            {workflowKind === 'i2v' ? 'Узлы 7–8 и 10–22' : 'Узлы 10–12 и 20–22'}
+            {workflowKind === 'i2v' ? 'Узлы 7 и 30 (I2V)' : 'Узел 30 (Latent)'}
           </p>
           <p className="mt-1 text-xs leading-relaxed text-[#94A3B8]">
             {workflowKind === 'i2v'
-              ? 'Стартовый кадр (#7) + исходные референсы персонажей (#10–12, #20–22) с защитой веса 0.75–0.85 на каждом новом сегменте.'
-              : 'Фото персонажей загружаются через /upload/image; первое фото используется как стартовый кадр I2V. В граф ComfyUI референсы не подключаются.'}
+              ? 'Стартовый кадр (#7, загружается в корень input/ ComfyUI) подаётся напрямую в WanImageToVideo (#30) или Wan22ImageToVideoLatent для TI2V-5B.'
+              : 'Латент EmptyHunyuanLatentVideo для 14B MoE или 48-канальный Wan22ImageToVideoLatent для TI2V-5B.'}
           </p>
         </div>
         <div>
-          <p className="font-mono text-xs font-medium text-[#F6AD55]">Узлы 55–57, 58, 60</p>
+          <p className="font-mono text-xs font-medium text-[#F6AD55]">Узлы 55–57, 58, 60–61</p>
           <p className="mt-1 text-xs leading-relaxed text-[#94A3B8]">
             Постобработка: нейро-апскейл <span className="font-mono">1080p</span> (#55–57),
-            интерполяция <span className="font-mono">RIFE VFI</span> 24/30 FPS (#58) и экспорт{' '}
-            <span className="font-mono">.mp4</span> (#60).
+            интерполяция <span className="font-mono">RIFE VFI</span> (#58) и экспорт{' '}
+            <span className="font-mono">.mp4</span> через VHS_VideoCombine или встроенные CreateVideo + SaveVideo.
           </p>
         </div>
       </div>

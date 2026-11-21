@@ -99,6 +99,21 @@ export async function performComfyRequest(options) {
     }
 
     const response = await fetch(parsedUrl.toString(), fetchOptions);
+    const contentType = response.headers.get('content-type') || undefined;
+
+    if (options?.responseType === 'base64') {
+      const bytes = Buffer.from(await response.arrayBuffer());
+      return {
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        bodyText: '',
+        bodyBase64: bytes.toString('base64'),
+        contentType,
+        networkError: false,
+      };
+    }
+
     const bodyText = await response.text();
 
     return {
@@ -106,6 +121,7 @@ export async function performComfyRequest(options) {
       status: response.status,
       statusText: response.statusText,
       bodyText,
+      contentType,
       networkError: false,
     };
   } catch (err) {

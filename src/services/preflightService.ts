@@ -67,6 +67,11 @@ export interface PreflightReport {
   missingFiles: MissingFile[];
   /** Set to 'core' when VHS_VideoCombine is absent but ComfyUI's built-in CreateVideo + SaveVideo nodes are installed. */
   videoExportBackend?: VideoExportBackend;
+  /** Exact option strings reported by ComfyUI when a model lives in a subfolder (e.g. "wan/model.safetensors"). */
+  resolvedModelNames?: Record<string, string>;
+  /** Validated SaveVideo format/codec strings reported by ComfyUI /object_info/SaveVideo. */
+  coreVideoFormat?: string;
+  coreVideoCodec?: string;
 }
 
 export class PreflightError extends Error {
@@ -95,14 +100,36 @@ function normalizeName(value: string): string {
   return value.replace(/\\/g, '/').toLowerCase();
 }
 
-/** ComfyUI may list files with sub-folders ("wan/model.safetensors"); match by full path or basename. */
-function isInstalled(value: string, options: string[]): boolean {
+export function buildModelResolutionKey(classType: string, field: string, value: string): string {
+  return `${classType}:${field}:${value}`;
+}
+
+/**
+ * ComfyUI may list files inside sub-folders ("wan/model.safetensors" or "wan\\model.safetensors").
+ * Returns the exact string listed by ComfyUI so POST /prompt passes strict combo validation.
+ */
+export function findInstalledOption(value: string, options: string[]): string | null {
   const wanted = normalizeName(value);
+  const exact = options.find((option) => normalizeName(option) === wanted);
+  if (exact) return exact;
+
   const wantedBase = wanted.split('/').pop();
-  return options.some((option) => {
-    const normalized = normalizeName(option);
-    return normalized === wanted || normalized.split('/').pop() === wantedBase;
-  });
+  const byBase = options.find((option) => normalizeName(option).split('/').pop() === wantedBase);
+  return byBase ?? null;
+}
+
+function pickPreferredOption(
+  spec: unknown,
+  preferred: string[],
+  fallback: string,
+): string {
+  const options = extractComboOptions(spec);
+  if (!options || options.length === 0) return fallback;
+  for (const candidate of preferred) {
+    const exact = options.find((opt) => opt.toLowerCase() === candidate.toLowerCase());
+    if (exact) return exact;
+  }
+  return options[0];
 }
 
 export function collectGraphClassTypes(graphs: GraphLike[]): string[] {
@@ -128,6 +155,7 @@ export function analyzePreflight(
   const missingNodeMap = new Map<string, Set<string>>();
   const missingFiles: MissingFile[] = [];
   const seenFiles = new Set<string>();
+  const resolvedModelNames: Record<string, string> = {};
   const canUseCoreVideoExport =
     !objectInfo.VHS_VideoCombine && Boolean(objectInfo.CreateVideo && objectInfo.SaveVideo);
   let usesCoreVideoFallback = false;
@@ -153,9 +181,18 @@ export function analyzePreflight(
         if (typeof value !== 'string' || !value || value.startsWith('{{')) continue;
 
         const options = extractComboOptions(info?.input?.required?.[rule.field]);
-        if (!options || isInstalled(value, options)) continue;
+        if (!options) continue;
 
-        const key = `${rule.classType}:${rule.field}:${value}`;
+        const matchedOption = findInstalledOption(value, options);
+        if (matchedOption) {
+          if (matchedOption !== value) {
+            resolvedModelNames[buildModelResolutionKey(rule.classType, rule.field, value)] =
+              matchedOption;
+          }
+          continue;
+        }
+
+        const key = buildModelResolutionKey(rule.classType, rule.field, value);
         if (seenFiles.has(key)) continue;
         seenFiles.add(key);
 
@@ -185,8 +222,24 @@ export function analyzePreflight(
     missingNodes,
     missingFiles,
   };
+  if (Object.keys(resolvedModelNames).length > 0) {
+    report.resolvedModelNames = resolvedModelNames;
+  }
   if (usesCoreVideoFallback) {
     report.videoExportBackend = 'core';
+    const saveVideoRequired = objectInfo.SaveVideo?.input?.required;
+    if (saveVideoRequired) {
+      report.coreVideoFormat = pickPreferredOption(
+        saveVideoRequired.format,
+        ['mp4', 'auto'],
+        'mp4',
+      );
+      report.coreVideoCodec = pickPreferredOption(
+        saveVideoRequired.codec,
+        ['h264', 'auto'],
+        'h264',
+      );
+    }
   }
   return report;
 }
@@ -225,20 +278,34 @@ export async function fetchObjectInfo(
 ): Promise<Record<string, any>> {
   const base = serverUrl.replace(/\/+$/, '');
   const merged: Record<string, any> = {};
-  await Promise.all(
+  let receivedAnyHttpResponse = false;
+  let lastNetworkError: unknown = null;
+
+  await Promise.allSettled(
     classTypes.map(async (classType) => {
-      const response = await fetchImpl(`${base}/object_info/${encodeURIComponent(classType)}`, {
-        method: 'GET',
-        mode: 'cors',
-      });
-      if (response.status === 404) return;
-      if (!response.ok) {
-        throw new Error(`ComfyUI ответил HTTP ${response.status} на /object_info.`);
+      try {
+        const response = await fetchImpl(`${base}/object_info/${encodeURIComponent(classType)}`, {
+          method: 'GET',
+          mode: 'cors',
+        });
+        receivedAnyHttpResponse = true;
+        if (!response.ok) {
+          // Unknown/unsupported node classes may return 404 or 400 depending on ComfyUI version;
+          // treat as absent rather than aborting the whole preflight check.
+          return;
+        }
+        const payload = (await response.json()) as Record<string, any>;
+        if (payload && payload[classType]) merged[classType] = payload[classType];
+      } catch (err) {
+        lastNetworkError = err;
       }
-      const payload = (await response.json()) as Record<string, any>;
-      if (payload && payload[classType]) merged[classType] = payload[classType];
     }),
   );
+
+  if (classTypes.length > 0 && !receivedAnyHttpResponse) {
+    throw lastNetworkError ?? new Error('Не удалось связаться с /object_info ComfyUI.');
+  }
+
   return merged;
 }
 

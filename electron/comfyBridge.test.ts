@@ -55,6 +55,12 @@ function startNoCorsMockComfyServer(): Promise<{ server: http.Server; port: numb
         return;
       }
 
+      if (req.method === 'GET' && req.url?.startsWith('/view')) {
+        res.writeHead(200, { 'Content-Type': 'video/mp4' });
+        res.end(Buffer.from([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]));
+        return;
+      }
+
       res.writeHead(404);
       res.end('Not Found');
     });
@@ -110,6 +116,19 @@ test('performComfyRequest connects to ComfyUI without CORS headers for GET, POST
     const uploaded = JSON.parse(uploadRes.bodyText);
     assert.equal(uploaded.name, 'hero.png');
     assert.equal(uploaded.subfolder, 'kinoflow_refs');
+
+    const videoRes = await performComfyRequest({
+      url: `${baseUrl}/view?filename=clip.mp4&type=output`,
+      method: 'GET',
+      responseType: 'base64',
+      timeoutMs: 3000,
+    });
+    assert.equal(videoRes.ok, true);
+    assert.equal(videoRes.contentType, 'video/mp4');
+    assert.deepEqual(
+      Buffer.from(videoRes.bodyBase64 ?? '', 'base64'),
+      Buffer.from([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]),
+    );
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

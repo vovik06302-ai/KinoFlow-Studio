@@ -5,7 +5,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { UpdateManager } from './appUpdater.js';
 import { ModelDownloadManager, scanModelsDirectory } from './modelDownloader.js';
-import { performComfyRequest, probeLocalComfyUrls } from './comfyBridge.js';
+import {
+  DEFAULT_COMFY_PROBE_PORTS,
+  performComfyRequest,
+  probeLocalComfyUrls,
+} from './comfyBridge.js';
 import { ComfyLauncher, findLaunchScript } from './comfyLauncher.js';
 import { findFfmpeg, isHttpUrl, mergeSegments } from './filmMerger.js';
 import {
@@ -25,7 +29,6 @@ let updaterRegistered = false;
 let mainWindowRef = null;
 
 // ---- Автозапуск ComfyUI вместе с программой ----
-const COMFY_AUTOSTART_PORT = 8188;
 
 function getSettingsPath() {
   return path.join(app.getPath('userData'), 'launcher-settings.json');
@@ -68,7 +71,10 @@ async function autoStartComfy() {
   try {
     const comfyDir = readSavedComfyDir();
     if (!comfyDir) return; // папка ещё не выбрана — запуск вручную один раз сохранит её
-    if (await isPortOpen(COMFY_AUTOSTART_PORT)) return; // ComfyUI уже работает
+    const portStates = await Promise.all(
+      DEFAULT_COMFY_PROBE_PORTS.map((port) => isPortOpen(port)),
+    );
+    if (portStates.some(Boolean)) return; // ComfyUI уже работает (Portable 8188 / Desktop 8000 / 8189)
     const scriptPath = findLaunchScript(comfyDir);
     if (!scriptPath) return;
     await comfyLauncher.start(scriptPath);

@@ -6,6 +6,8 @@ import {
   AUTO_T2V_LOW_MODEL_FILE,
   AUTO_T2V_MODEL_FILE,
   DEFAULT_NEGATIVE_PROMPT,
+  applyShootingStyleToPrompt,
+  buildRootUploadFilename,
   buildWorkflowFromTemplate,
   classifyConnectionError,
   computeChainedCharacterWeight,
@@ -13,9 +15,12 @@ import {
   computeUpscaleTargetSize,
   createComfyFetch,
   describeAutoRoutingStatus,
+  extractExecutionErrorFromHistory,
   extractVideoOutputFromHistory,
+  formatGenerationErrorMessage,
   formatSegmentLabel,
   getViewUrl,
+  isHistoryPromptFinished,
   normalizeBaseUrl,
   parseComfyWsEvent,
   planGenerationSegments,
@@ -23,6 +28,7 @@ import {
   secondsToAlignedFrames,
   toWebSocketUrl,
 } from './comfyService';
+import { buildModelResolutionKey } from './preflightService';
 import type { GenerationSettings } from '../types/video';
 
 const baseSettings: GenerationSettings = {
@@ -146,7 +152,11 @@ test('buildWorkflowFromTemplate strips post-processing nodes 55-58 when disabled
   assert.equal(graph['56'], undefined);
   assert.equal(graph['57'], undefined);
   assert.equal(graph['58'], undefined);
-  assert.deepEqual(graph['40'].inputs.model, ['1', 0]);
+  assert.equal(graph['101'].class_type, 'ModelSamplingSD3');
+  assert.equal(graph['101'].inputs.shift, 5.0);
+  assert.deepEqual(graph['40'].inputs.model, ['101', 0]);
+  assert.equal(graph['102'].class_type, 'ModelSamplingSD3');
+  assert.deepEqual(graph['41'].inputs.model, ['102', 0]);
   assert.equal(graph['5'].inputs.text, 'A slow dolly shot along a rainy street.');
   assert.equal(graph['30'].inputs.length, 121);
   assert.deepEqual(graph['60'].inputs.images, ['50', 0]);
@@ -184,16 +194,16 @@ test('buildWorkflowFromTemplate wires 1080p Upscale (#55-#57) and RIFE VFI (#58)
   assert.equal(graph['60'].inputs.frame_rate, 32, 'RIFE x2 on 16 fps must play at 32 fps, not slow-mo');
 });
 
-test('buildWorkflowFromTemplate I2V graph has no IP-Adapter nodes and every link points to an existing node', () => {
+test('buildWorkflowFromTemplate I2V graph omits CLIPVision/IP-Adapter and every link points to an existing node', () => {
   const graph = buildWorkflowFromTemplate({
     settings: { ...baseSettings, mode: 'i2v', fps: 16 },
     positivePrompt: 'Marina turns toward the harbor lights as rain falls.',
     negativePrompt: DEFAULT_NEGATIVE_PROMPT,
-    startFrameFilename: 'kinoflow_chain/seg1_last_frame.png',
+    startFrameFilename: 'kinoflow_chain_1700000_seg1_last_frame.png',
     segmentIndex: 2,
     characters: [
-      { name: 'Марина', weight: 0.45, imageFilename: 'kinoflow_refs/marina.png' },
-      { name: 'Владимир', weight: 0.98, imageFilename: 'kinoflow_refs/vladimir.png' },
+      { name: 'Марина', weight: 0.45, imageFilename: 'kinoflow_ref_1700000_marina.png' },
+      { name: 'Владимир', weight: 0.98, imageFilename: 'kinoflow_ref_1700000_vladimir.png' },
     ],
   });
 
@@ -202,14 +212,16 @@ test('buildWorkflowFromTemplate I2V graph has no IP-Adapter nodes and every link
   assert.equal(graph['2'].inputs.unet_name, 'wan2.2_i2v_low_noise_14B_Q4_K_M.gguf');
   assert.equal(graph['3'].class_type, 'CLIPLoaderGGUF');
   assert.equal(graph['7'].class_type, 'LoadImage');
-  assert.equal(graph['7'].inputs.image, 'kinoflow_chain/seg1_last_frame.png');
+  assert.equal(graph['7'].inputs.image, 'kinoflow_chain_1700000_seg1_last_frame.png');
   assert.equal(graph['30'].class_type, 'WanImageToVideo');
   assert.deepEqual(graph['30'].inputs.start_image, ['7', 0]);
-  assert.ok(graph['15'], 'CLIPVisionLoader must stay present for I2V start frame conditioning');
-  for (const id of ['10', '11', '12', '20', '21', '22']) {
+  assert.equal(graph['30'].inputs.clip_vision_output, undefined);
+  for (const id of ['8', '10', '11', '12', '15', '20', '21', '22']) {
     assert.equal(graph[id], undefined, `node ${id} must not exist`);
   }
-  assert.deepEqual(graph['40'].inputs.model, ['1', 0]);
+  assert.equal(graph['101'].class_type, 'ModelSamplingSD3');
+  assert.deepEqual(graph['40'].inputs.model, ['101', 0]);
+  assert.deepEqual(graph['41'].inputs.model, ['102', 0]);
 
   for (const [id, node] of Object.entries(graph)) {
     for (const value of Object.values(node.inputs)) {
@@ -220,21 +232,47 @@ test('buildWorkflowFromTemplate I2V graph has no IP-Adapter nodes and every link
   }
 });
 
-test('buildWorkflowFromTemplate switches to single-stage sampler for CogVideoX I2V', () => {
-  const graph = buildWorkflowFromTemplate({
-    settings: { ...baseSettings, mode: 'i2v', modelId: 'cogvideox-15-5b-fp8', steps: 30 },
+test('buildWorkflowFromTemplate configures Wan 2.2 TI2V-5B with Wan22ImageToVideoLatent and single-stage sampler', () => {
+  const i2vGraph = buildWorkflowFromTemplate({
+    settings: { ...baseSettings, mode: 'i2v', modelId: 'wan22-ti2v-5b-fp8', steps: 24 },
     positivePrompt: 'Ocean waves crashing on dark cliffs',
     negativePrompt: 'blurry',
-    startFrameFilename: 'kinoflow_start/cliff.png',
+    startFrameFilename: 'kinoflow_start_1700000_cliff.png',
     characters: [],
   });
 
-  assert.equal(graph['1'].inputs.unet_name, 'cogvideox_1_5_5b_i2v_fp8_e4m3fn.safetensors');
-  assert.equal(graph['2'], undefined);
-  assert.equal(graph['41'], undefined);
-  assert.ok(graph['15'], 'CLIPVisionLoader stays present in I2V even without characters');
-  assert.deepEqual(graph['50'].inputs.samples, ['40', 0]);
-  assert.equal(graph['40'].inputs.end_at_step, 30);
+  assert.equal(i2vGraph['1'].class_type, 'UNETLoader');
+  assert.equal(i2vGraph['1'].inputs.unet_name, 'wan2.2_ti2v_5B_fp8_e4m3fn.safetensors');
+  assert.equal(i2vGraph['4'].inputs.vae_name, 'wan2.2_vae.safetensors');
+  assert.equal(i2vGraph['2'], undefined);
+  assert.equal(i2vGraph['102'], undefined);
+  assert.equal(i2vGraph['41'], undefined);
+  assert.equal(i2vGraph['30'].class_type, 'Wan22ImageToVideoLatent');
+  assert.deepEqual(i2vGraph['30'].inputs.vae, ['4', 0]);
+  assert.deepEqual(i2vGraph['30'].inputs.start_image, ['7', 0]);
+  assert.deepEqual(i2vGraph['40'].inputs.model, ['101', 0]);
+  assert.deepEqual(i2vGraph['40'].inputs.positive, ['5', 0]);
+  assert.deepEqual(i2vGraph['40'].inputs.negative, ['6', 0]);
+  assert.deepEqual(i2vGraph['40'].inputs.latent_image, ['30', 0]);
+  assert.deepEqual(i2vGraph['50'].inputs.samples, ['40', 0]);
+  assert.equal(i2vGraph['40'].inputs.end_at_step, 24);
+
+  for (const [id, node] of Object.entries(i2vGraph)) {
+    for (const value of Object.values(node.inputs)) {
+      if (Array.isArray(value) && typeof value[0] === 'string') {
+        assert.ok(i2vGraph[value[0]], `node ${id} links to missing node ${value[0]}`);
+      }
+    }
+  }
+
+  const t2vGraph = buildWorkflowFromTemplate({
+    settings: { ...baseSettings, mode: 't2v', modelId: 'wan22-ti2v-5b-fp8', steps: 24 },
+    positivePrompt: 'Rain over a quiet neon street',
+    negativePrompt: 'blurry',
+    characters: [],
+  });
+  assert.equal(t2vGraph['30'].class_type, 'Wan22ImageToVideoLatent');
+  assert.equal(t2vGraph['30'].inputs.start_image, undefined);
 });
 
 test('extractVideoOutputFromHistory parses VHS_VideoCombine gifs/mp4 output and builds /view URL', () => {
@@ -478,4 +516,127 @@ test('buildWorkflowFromTemplate swaps VHS_VideoCombine for built-in CreateVideo 
   assert.equal(graph['61'].inputs.format, 'mp4');
   assert.equal(graph['61'].inputs.codec, 'h264');
 });
+
+test('buildRootUploadFilename produces flat LoadImage-safe names without slashes', () => {
+  const name = buildRootUploadFilename('C:\\Users\\Фото (1).PNG', 'kinoflow_start', 1700000000);
+  assert.ok(!name.includes('/'));
+  assert.ok(!name.includes('\\'));
+  assert.match(name, /^kinoflow_start_1700000000_[a-zA-Z0-9_-]+\.png$/);
+
+  const unicodeOnly = buildRootUploadFilename('портрет.jpg', 'kinoflow_ref', 1700000001);
+  assert.equal(unicodeOnly, 'kinoflow_ref_1700000001_frame.jpg');
+});
+
+test('buildWorkflowFromTemplate applies exact subfolder paths from resolvedModelNames', () => {
+  const graph = buildWorkflowFromTemplate({
+    settings: { ...baseSettings, modelId: 'auto', mode: 't2v' },
+    positivePrompt: 'Sunrise over mountains.',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    characters: [],
+    resolvedModelNames: {
+      [buildModelResolutionKey(
+        'UNETLoader',
+        'unet_name',
+        'wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors',
+      )]: 'wan22\\wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors',
+      [buildModelResolutionKey('VAELoader', 'vae_name', 'wan_2.1_vae.safetensors')]:
+        'wan/wan_2.1_vae.safetensors',
+    },
+  });
+
+  assert.equal(graph['1'].inputs.unet_name, 'wan22\\wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors');
+  assert.equal(graph['4'].inputs.vae_name, 'wan/wan_2.1_vae.safetensors');
+});
+
+test('extractExecutionErrorFromHistory and parseComfyWsEvent surface ComfyUI node crashes and interrupts', () => {
+  const failedHistory = {
+    'p-err': {
+      status: {
+        status_str: 'error',
+        completed: false,
+        messages: [
+          ['execution_start', { prompt_id: 'p-err' }],
+          [
+            'execution_error',
+            {
+              prompt_id: 'p-err',
+              node_id: '40',
+              node_type: 'KSamplerAdvanced',
+              exception_message: 'CUDA out of memory',
+            },
+          ],
+        ],
+      },
+      outputs: {},
+    },
+  };
+
+  const errMsg = extractExecutionErrorFromHistory(failedHistory, 'p-err');
+  assert.ok(errMsg);
+  assert.match(errMsg, /Узел #40/);
+  assert.match(errMsg, /KSamplerAdvanced/);
+  assert.match(errMsg, /CUDA out of memory/);
+  assert.equal(isHistoryPromptFinished(failedHistory, 'p-err'), true);
+
+  const wsErr = parseComfyWsEvent(
+    JSON.stringify({
+      type: 'execution_error',
+      data: {
+        prompt_id: 'p-err',
+        node_id: '7',
+        node_type: 'LoadImage',
+        exception_message: 'File not found',
+      },
+    }),
+    'p-err',
+  );
+  assert.equal(wsErr.type, 'execution_error');
+  assert.equal(wsErr.nodeId, '7');
+  assert.match(wsErr.errorMessage ?? '', /LoadImage/);
+
+  const wsInterrupt = parseComfyWsEvent(
+    JSON.stringify({
+      type: 'execution_interrupted',
+      data: { prompt_id: 'p-err', node_id: '40' },
+    }),
+    'p-err',
+  );
+  assert.equal(wsInterrupt.type, 'execution_interrupted');
+});
+
+test('applyShootingStyleToPrompt injects style cue on direct generation and skips when already enhanced', () => {
+  const styled = applyShootingStyleToPrompt('A cyclist rides in the rain', 'night-neon', false);
+  assert.match(styled, /A cyclist rides in the rain\. Low-light night cinematography/);
+
+  const enhanced = applyShootingStyleToPrompt('Already enhanced prompt', 'night-neon', true);
+  assert.equal(enhanced, 'Already enhanced prompt');
+});
+
+test('formatGenerationErrorMessage preserves ComfyUI errors without bogus CORS suffixes and classifies network errors', () => {
+  const nodeCrash = formatGenerationErrorMessage({
+    message: 'Ошибка ComfyUI · Узел #40 (KSamplerAdvanced): CUDA out of memory',
+    serverUrl: 'http://127.0.0.1:8188',
+    isElectron: false,
+    pageProtocol: 'http:',
+  });
+  assert.equal(nodeCrash, 'Ошибка ComfyUI · Узел #40 (KSamplerAdvanced): CUDA out of memory');
+  assert.ok(!nodeCrash.includes('--enable-cors-header'));
+
+  const browserNet = formatGenerationErrorMessage({
+    message: 'Failed to fetch',
+    serverUrl: 'http://127.0.0.1:8188',
+    isElectron: false,
+    pageProtocol: 'http:',
+  });
+  assert.match(browserNet, /--enable-cors-header/);
+
+  const electronNet = formatGenerationErrorMessage({
+    message: 'connect ECONNREFUSED 127.0.0.1:8188',
+    serverUrl: 'http://127.0.0.1:8188',
+    isElectron: true,
+  });
+  assert.match(electronNet, /порт закрыт/i);
+  assert.ok(!electronNet.includes('--enable-cors-header'));
+});
+
 

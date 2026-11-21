@@ -6,7 +6,7 @@
     },
     "_meta": {
       "title": "T2V Base Diffusion Model (High-Noise / Primary DiT)",
-      "comment": "СЮДА ПОДСТАВЛЯЕТСЯ T2V-модель из Settings (например, wan2.2_t2v_high_noise_14B_Q4_K_M.gguf или cogvideox_1_5_5b_fp8_e4m3fn.safetensors)."
+      "comment": "СЮДА ПОДСТАВЛЯЕТСЯ T2V-модель из Settings (например, wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors или Q4_K_M.gguf)."
     }
   },
   "2": {
@@ -16,7 +16,35 @@
     },
     "_meta": {
       "title": "Wan 2.2 T2V Low-Noise MoE Expert",
-      "comment": "Второй эксперт MoE для детализации (удаляется автоматически для одноступенчатых моделей типа CogVideoX / TI2V-5B)."
+      "comment": "Второй эксперт MoE для детализации (удаляется автоматически для одноступенчатой модели Wan 2.2 TI2V-5B)."
+    }
+  },
+  "101": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "shift": 5.0
+    },
+    "_meta": {
+      "title": "Wan 2.2 Flow Shift (High-Noise, shift=5.0)",
+      "comment": "Официальный сдвиг расписания шума для Wan 2.2 (ModelSamplingSD3 shift=5.0)."
+    }
+  },
+  "102": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "shift": 5.0
+    },
+    "_meta": {
+      "title": "Wan 2.2 Flow Shift (Low-Noise, shift=5.0)",
+      "comment": "Официальный сдвиг расписания шума для второго эксперта Wan 2.2 MoE (удаляется для TI2V-5B)."
     }
   },
   "3": {
@@ -38,7 +66,7 @@
     },
     "_meta": {
       "title": "Video VAE Loader",
-      "comment": "Видео-VAE модели Wan 2.2 / CogVideoX."
+      "comment": "Видео-VAE модели Wan 2.2 (wan_2.1_vae для 14B MoE или wan2.2_vae для TI2V-5B)."
     }
   },
   "5": {
@@ -79,14 +107,14 @@
     },
     "_meta": {
       "title": "T2V Video Latent Dimensions & Segment Frames",
-      "comment": "СЮДА ПОДСТАВЛЯЮТСЯ базовое разрешение и число кадров 5-секундного сегмента (81 при 16 fps или 121 при 24 fps)."
+      "comment": "СЮДА ПОДСТАВЛЯЮТСЯ базовое разрешение и число кадров 5-секундного сегмента (81 при 16 fps или 121 при 24 fps). Для TI2V-5B автоматически заменяется на Wan22ImageToVideoLatent."
     }
   },
   "40": {
     "class_type": "KSamplerAdvanced",
     "inputs": {
       "model": [
-        "1",
+        "101",
         0
       ],
       "positive": [
@@ -120,7 +148,7 @@
     "class_type": "KSamplerAdvanced",
     "inputs": {
       "model": [
-        "2",
+        "102",
         0
       ],
       "positive": [

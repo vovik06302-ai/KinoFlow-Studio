@@ -1,7 +1,7 @@
 import workflowT2VTemplate from '../../workflow_t2v.json';
 import workflowI2VTemplate from '../../workflow_i2v.json';
 import { extractLastFrameFromVideo } from '../utils/videoFrameUtils';
-import { PreflightError, runPreflight } from './preflightService';
+import { PreflightError, buildModelResolutionKey, runPreflight } from './preflightService';
 import type { VideoExportBackend } from './preflightService';
 import { buildSegmentPrompt } from './storyboard';
 import type { CameraPresetId, StoryboardShot } from './storyboard';
@@ -76,6 +76,26 @@ export function getShootingStyleOption(styleId: ShootingStyleId): ShootingStyleO
   return SHOOTING_STYLES.find((s) => s.id === styleId) ?? SHOOTING_STYLES[0];
 }
 
+/**
+ * Applies the selected shooting style prompt cue to direct (non-Gemini-enhanced) prompts
+ * without duplicating it if already included.
+ */
+export function applyShootingStyleToPrompt(
+  prompt: string,
+  shootingStyle: ShootingStyleId,
+  alreadyEnhanced: boolean = false,
+): string {
+  const trimmed = prompt.trim();
+  if (!trimmed || alreadyEnhanced) return trimmed;
+  const style = getShootingStyleOption(shootingStyle);
+  if (!style.promptCue) return trimmed;
+  if (trimmed.toLowerCase().includes(style.promptCue.slice(0, 28).toLowerCase())) {
+    return trimmed;
+  }
+  const separator = /[.!?]$/.test(trimmed) ? ' ' : '. ';
+  return `${trimmed}${separator}${style.promptCue}`;
+}
+
 export const AUTO_T2V_MODEL_FILE = 'wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors';
 export const AUTO_T2V_LOW_MODEL_FILE = 'wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors';
 export const AUTO_I2V_MODEL_FILE = 'wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors';
@@ -147,22 +167,6 @@ export const VIDEO_MODELS: VideoModelOption[] = [
     defaultSteps: 24,
     vramHint: '~5.6 ГБ VRAM · T2V и I2V в одной модели',
   },
-  {
-    id: 'cogvideox-15-5b-fp8',
-    label: 'CogVideoX 1.5-5B (DiT · FP8)',
-    shortLabel: 'CogVideoX 1.5-5B',
-    architecture: 'cogvideox',
-    highNoiseFile: 'cogvideox_1_5_5b_fp8_e4m3fn.safetensors',
-    lowNoiseFile: 'cogvideox_1_5_5b_fp8_e4m3fn.safetensors',
-    i2vHighNoiseFile: 'cogvideox_1_5_5b_i2v_fp8_e4m3fn.safetensors',
-    i2vLowNoiseFile: 'cogvideox_1_5_5b_i2v_fp8_e4m3fn.safetensors',
-    textEncoderFile: 't5xxl_fp8_e4m3fn.safetensors',
-    textEncoderType: 'wan',
-    vaeFile: 'cogvideox_vae.safetensors',
-    defaultFps: 16,
-    defaultSteps: 30,
-    vramHint: '~5.8 ГБ VRAM · T5-XXL в RAM',
-  },
 ];
 
 export const RESOLUTION_PRESETS: ResolutionOption[] = [
@@ -212,6 +216,11 @@ export interface WorkflowBuildInput {
   segmentIndex?: number;
   isContinuation?: boolean;
   videoExportBackend?: VideoExportBackend;
+  /** Exact option strings from ComfyUI /object_info when models are located inside subfolders. */
+  resolvedModelNames?: Record<string, string>;
+  /** Optional validated format/codec for ComfyUI Core SaveVideo node. */
+  coreVideoFormat?: string;
+  coreVideoCodec?: string;
 }
 
 export interface AutoModelRouteDecision {
@@ -240,15 +249,23 @@ export interface VideoOutputInfo {
 }
 
 export interface ParsedWsEvent {
-  type: 'progress' | 'executing' | 'executed' | 'execution_error' | 'status' | 'other';
+  type:
+    | 'progress'
+    | 'executing'
+    | 'executed'
+    | 'execution_error'
+    | 'execution_interrupted'
+    | 'status'
+    | 'other';
   promptId?: string;
   nodeId?: string | null;
+  nodeType?: string;
   value?: number;
   max?: number;
   errorMessage?: string;
 }
 
-export function getModelOption(modelId: BaseModelId): VideoModelOption {
+export function getModelOption(modelId: BaseModelId | string): VideoModelOption {
   return VIDEO_MODELS.find((m) => m.id === modelId) ?? VIDEO_MODELS[0];
 }
 
@@ -486,34 +503,47 @@ export function buildWorkflowFromTemplate(
   const splitStep = Math.max(1, Math.min(steps - 1, Math.round(steps * 0.36)));
   const segmentFrames = secondsToAlignedFrames(SEGMENT_DURATION_SEC, input.settings.fps);
 
+  const resolveOption = (classType: string, field: string, fileName: string): string => {
+    const map = input.resolvedModelNames;
+    if (!map) return fileName;
+    return map[buildModelResolutionKey(classType, field, fileName)] ?? fileName;
+  };
+
   // .gguf files need the ComfyUI-GGUF loaders; .safetensors need the standard ones.
   const configureUnetLoader = (nodeId: string, fileName: string) => {
     const node = graph[nodeId];
     if (!node) return;
-    node.inputs.unet_name = fileName;
     if (fileName.toLowerCase().endsWith('.gguf')) {
       node.class_type = 'UnetLoaderGGUF';
+      node.inputs.unet_name = resolveOption('UnetLoaderGGUF', 'unet_name', fileName);
       delete node.inputs.weight_dtype;
     } else {
       node.class_type = 'UNETLoader';
+      node.inputs.unet_name = resolveOption('UNETLoader', 'unet_name', fileName);
       node.inputs.weight_dtype = 'default';
     }
   };
   configureUnetLoader('1', route.highNoiseModelFile);
   configureUnetLoader('2', route.lowNoiseModelFile);
+
   if (graph['3']) {
-    graph['3'].inputs.clip_name = model.textEncoderFile;
     graph['3'].inputs.type = model.textEncoderType;
     if (model.textEncoderFile.toLowerCase().endsWith('.gguf')) {
       graph['3'].class_type = 'CLIPLoaderGGUF';
+      graph['3'].inputs.clip_name = resolveOption(
+        'CLIPLoaderGGUF',
+        'clip_name',
+        model.textEncoderFile,
+      );
       delete graph['3'].inputs.device;
     } else {
       graph['3'].class_type = 'CLIPLoader';
+      graph['3'].inputs.clip_name = resolveOption('CLIPLoader', 'clip_name', model.textEncoderFile);
       graph['3'].inputs.device = 'cpu';
     }
   }
   if (graph['4']) {
-    graph['4'].inputs.vae_name = model.vaeFile;
+    graph['4'].inputs.vae_name = resolveOption('VAELoader', 'vae_name', model.vaeFile);
   }
   if (graph['5']) {
     graph['5'].inputs.text = input.positivePrompt.trim();
@@ -526,19 +556,65 @@ export function buildWorkflowFromTemplate(
     graph['7'].inputs.image = input.startFrameFilename || '{{START_FRAME_IMAGE}}';
   }
 
-  // Wan 2.2 has no IP-Adapter / FaceID support, so character photos are not injected into the
-  // sampler graph. Identity is carried by the start frame (see runComfyGeneration) and by the
-  // last-frame chaining between 5-second segments.
-  // CLIP Vision (node 15) is only needed in I2V; the T2V template does not contain it.
+  // Ensure ModelSamplingSD3 (shift=5.0) sits between UNET loader(s) and KSamplerAdvanced for Wan 2.2.
+  if (!graph['101']) {
+    graph['101'] = {
+      class_type: 'ModelSamplingSD3',
+      inputs: {
+        model: ['1', 0],
+        shift: 5.0,
+      },
+      _meta: {
+        title: 'Wan 2.2 Flow Shift (High-Noise, shift=5.0)',
+      },
+    };
+  }
+  if (model.architecture === 'wan22-moe' && !graph['102']) {
+    graph['102'] = {
+      class_type: 'ModelSamplingSD3',
+      inputs: {
+        model: ['2', 0],
+        shift: 5.0,
+      },
+      _meta: {
+        title: 'Wan 2.2 Flow Shift (Low-Noise, shift=5.0)',
+      },
+    };
+  }
 
-  if (graph['30']) {
+  // Wan 2.2 TI2V-5B (wan22-dense) uses 48-channel wan2.2_vae and requires Wan22ImageToVideoLatent
+  // instead of 16-channel EmptyHunyuanLatentVideo / WanImageToVideo.
+  if (model.architecture === 'wan22-dense') {
+    const latentInputs: Record<string, unknown> = {
+      vae: ['4', 0],
+      width: input.settings.width,
+      height: input.settings.height,
+      length: segmentFrames,
+      batch_size: 1,
+    };
+    if (mode === 'i2v' && graph['7']) {
+      latentInputs.start_image = ['7', 0];
+    }
+    graph['30'] = {
+      class_type: 'Wan22ImageToVideoLatent',
+      inputs: latentInputs,
+      _meta: {
+        title: 'Wan 2.2 TI2V-5B 48-ch Latent',
+      },
+    };
+    if (graph['40']) {
+      graph['40'].inputs.positive = ['5', 0];
+      graph['40'].inputs.negative = ['6', 0];
+      graph['40'].inputs.latent_image = ['30', 0];
+    }
+  } else if (graph['30']) {
     graph['30'].inputs.width = input.settings.width;
     graph['30'].inputs.height = input.settings.height;
     graph['30'].inputs.length = segmentFrames;
   }
 
   if (graph['40']) {
-    graph['40'].inputs.model = ['1', 0];
+    graph['40'].inputs.model = ['101', 0];
     graph['40'].inputs.noise_seed = seed;
     graph['40'].inputs.steps = steps;
     graph['40'].inputs.end_at_step = model.architecture === 'wan22-moe' ? splitStep : steps;
@@ -548,6 +624,7 @@ export function buildWorkflowFromTemplate(
 
   if (model.architecture === 'wan22-moe') {
     if (graph['41']) {
+      graph['41'].inputs.model = ['102', 0];
       graph['41'].inputs.noise_seed = seed;
       graph['41'].inputs.steps = steps;
       graph['41'].inputs.start_at_step = splitStep;
@@ -557,6 +634,7 @@ export function buildWorkflowFromTemplate(
     }
   } else {
     delete graph['2'];
+    delete graph['102'];
     delete graph['41'];
     if (graph['50']) {
       graph['50'].inputs.samples = ['40', 0];
@@ -568,6 +646,13 @@ export function buildWorkflowFromTemplate(
 
   if (input.settings.upscale1080p) {
     const target1080p = computeUpscaleTargetSize(input.settings.width, input.settings.height);
+    if (graph['55'] && typeof graph['55'].inputs.model_name === 'string') {
+      graph['55'].inputs.model_name = resolveOption(
+        'UpscaleModelLoader',
+        'model_name',
+        graph['55'].inputs.model_name,
+      );
+    }
     if (graph['56']) {
       graph['56'].inputs.image = currentImageLink;
     }
@@ -618,8 +703,8 @@ export function buildWorkflowFromTemplate(
       inputs: {
         video: ['60', 0],
         filename_prefix: resolvedPrefix,
-        format: 'mp4',
-        codec: 'h264',
+        format: input.coreVideoFormat ?? 'mp4',
+        codec: input.coreVideoCodec ?? 'h264',
       },
       _meta: {
         title: 'Save MP4 Video (ComfyUI Core)',
@@ -679,6 +764,46 @@ function getElectronComfyBridge(): ElectronComfyBridge | null {
   if (typeof window === 'undefined') return null;
   const candidate = (window as unknown as { kinoflowComfy?: ElectronComfyBridge }).kinoflowComfy;
   return candidate && typeof candidate.request === 'function' ? candidate : null;
+}
+
+export function isElectronComfyBridgeAvailable(): boolean {
+  return getElectronComfyBridge() !== null;
+}
+
+/**
+ * Formats a user-facing generation error without attaching misleading CORS flags when the error
+ * came from ComfyUI itself (HTTP 400/500, node crash, missing frame) or from Electron desktop.
+ */
+export function formatGenerationErrorMessage(params: {
+  message: string;
+  serverUrl: string;
+  isElectron: boolean;
+  pageProtocol?: string;
+}): string {
+  const { message, serverUrl, isElectron, pageProtocol } = params;
+  const trimmed = message.trim();
+  const isNetworkFailure =
+    /^failed to fetch$/i.test(trimmed) ||
+    /^networkerror/i.test(trimmed) ||
+    /^load failed$/i.test(trimmed) ||
+    /ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ETIMEDOUT|NETWORK_ERROR/i.test(trimmed);
+
+  if (!isNetworkFailure) {
+    return trimmed;
+  }
+
+  return classifyConnectionError({
+    serverUrl,
+    isElectron,
+    pageProtocol,
+    errorCode: /ECONNREFUSED/i.test(trimmed)
+      ? 'ECONNREFUSED'
+      : /ETIMEDOUT/i.test(trimmed)
+        ? 'ETIMEDOUT'
+        : /ENOTFOUND/i.test(trimmed)
+          ? 'ENOTFOUND'
+          : undefined,
+  });
 }
 
 /**
@@ -921,15 +1046,42 @@ export async function checkConnection(
 }
 
 /**
- * Uploads an image (character reference, start frame, or extracted last frame) via POST /upload/image.
+ * Builds a flat, collision-resistant filename for ComfyUI's root `input/` folder.
+ * Standard ComfyUI `LoadImage` only validates files in root `input/` and rejects subfolder paths
+ * containing `/` with HTTP 400 ("Value not in list").
+ */
+export function buildRootUploadFilename(
+  originalName: string,
+  prefix: string = 'kinoflow',
+  timestamp: number = Date.now(),
+): string {
+  const baseName = originalName.replace(/^.*[\\/]/, '').trim() || 'frame.png';
+  const extMatch = /\.(png|jpe?g|webp|bmp)$/i.exec(baseName);
+  const ext = extMatch ? extMatch[0].toLowerCase() : '.png';
+  const stemRaw = extMatch ? baseName.slice(0, -extMatch[0].length) : baseName;
+  const safeStem = stemRaw
+    .replace(/[^a-zA-Z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 48) || 'frame';
+  const safePrefix = prefix
+    .replace(/[^a-zA-Z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 24) || 'kinoflow';
+  return `${safePrefix}_${timestamp}_${safeStem}${ext}`;
+}
+
+/**
+ * Uploads an image (character reference, start frame, or extracted last frame) via POST /upload/image
+ * directly into ComfyUI's root `input/` directory so `LoadImage` always accepts it.
  */
 export async function uploadImage(
   serverUrl: string,
   file: File,
-  subfolder: string = 'kinoflow_refs',
+  prefix: string = 'kinoflow_ref',
 ): Promise<UploadedImageResult> {
   const base = normalizeBaseUrl(serverUrl);
   const electronBridge = getElectronComfyBridge();
+  const uploadFileName = buildRootUploadFilename(file.name, prefix);
 
   if (electronBridge) {
     const bytesBase64 = arrayBufferToBase64(await file.arrayBuffer());
@@ -939,12 +1091,12 @@ export async function uploadImage(
       timeoutMs: 30000,
       multipart: {
         fieldName: 'image',
-        fileName: file.name,
+        fileName: uploadFileName,
         contentType: file.type || 'image/png',
         bytesBase64,
         fields: {
           type: 'input',
-          subfolder,
+          subfolder: '',
           overwrite: 'true',
         },
       },
@@ -971,9 +1123,9 @@ export async function uploadImage(
   }
 
   const formData = new FormData();
-  formData.append('image', file, file.name);
+  formData.append('image', file, uploadFileName);
   formData.append('type', 'input');
-  formData.append('subfolder', subfolder);
+  formData.append('subfolder', '');
   formData.append('overwrite', 'true');
 
   const response = await fetch(`${base}/upload/image`, {
@@ -1199,6 +1351,72 @@ export function extractVideoOutputFromHistory(
   };
 }
 
+interface HistoryStatusEntry {
+  status_str?: string;
+  completed?: boolean;
+  messages?: Array<[string, Record<string, unknown>?]>;
+}
+
+/**
+ * Inspects `/history/{prompt_id}` status block for ComfyUI execution errors or interruptions
+ * so failed workflows surface immediately instead of polling indefinitely.
+ */
+export function extractExecutionErrorFromHistory(
+  historyPayload: Record<string, unknown>,
+  promptId: string,
+): string | null {
+  const entry = historyPayload[promptId] as { status?: HistoryStatusEntry } | undefined;
+  const status = entry?.status;
+  if (!status) return null;
+
+  if (Array.isArray(status.messages)) {
+    for (const msg of status.messages) {
+      if (!Array.isArray(msg)) continue;
+      const [eventType, payload] = msg;
+      if (eventType === 'execution_error') {
+        const nodeId = payload?.node_id ?? payload?.node;
+        const nodeType = typeof payload?.node_type === 'string' ? payload.node_type : undefined;
+        const exc =
+          typeof payload?.exception_message === 'string' && payload.exception_message.trim()
+            ? payload.exception_message.trim()
+            : 'Ошибка выполнения узла в ComfyUI.';
+        const nodePrefix = nodeId
+          ? `Узел #${nodeId}${nodeType ? ` (${nodeType})` : ''}: `
+          : nodeType
+            ? `${nodeType}: `
+            : '';
+        return `Ошибка ComfyUI · ${nodePrefix}${exc}`;
+      }
+      if (eventType === 'execution_interrupted') {
+        return 'Генерация была прервана на сервере ComfyUI.';
+      }
+    }
+  }
+
+  if (status.status_str === 'error') {
+    return 'ComfyUI завершил задачу с ошибкой. Проверьте консоль ComfyUI для деталей.';
+  }
+
+  return null;
+}
+
+/**
+ * Returns true once ComfyUI marks the prompt as completed/finished in `/history/{prompt_id}`.
+ */
+export function isHistoryPromptFinished(
+  historyPayload: Record<string, unknown>,
+  promptId: string,
+): boolean {
+  const entry = historyPayload[promptId] as { status?: HistoryStatusEntry } | undefined;
+  const status = entry?.status;
+  if (!status) return false;
+  return (
+    status.completed === true ||
+    status.status_str === 'success' ||
+    status.status_str === 'error'
+  );
+}
+
 export function parseComfyWsEvent(rawMessage: string, expectedPromptId?: string): ParsedWsEvent {
   try {
     const parsed = JSON.parse(rawMessage) as {
@@ -1206,6 +1424,8 @@ export function parseComfyWsEvent(rawMessage: string, expectedPromptId?: string)
       data?: {
         prompt_id?: string;
         node?: string | null;
+        node_id?: string | null;
+        node_type?: string;
         value?: number;
         max?: number;
         exception_message?: string;
@@ -1244,11 +1464,29 @@ export function parseComfyWsEvent(rawMessage: string, expectedPromptId?: string)
     }
 
     if (parsed.type === 'execution_error') {
+      const nodeId = data.node_id ?? data.node ?? null;
+      const nodeType = data.node_type;
+      const exc = data.exception_message?.trim() || 'Ошибка выполнения узла в ComfyUI.';
+      const nodePrefix = nodeId
+        ? `Узел #${nodeId}${nodeType ? ` (${nodeType})` : ''}: `
+        : nodeType
+          ? `${nodeType}: `
+          : '';
       return {
         type: 'execution_error',
         promptId: data.prompt_id,
-        nodeId: data.node,
-        errorMessage: data.exception_message || 'Ошибка выполнения узла в ComfyUI.',
+        nodeId,
+        nodeType,
+        errorMessage: `Ошибка ComfyUI · ${nodePrefix}${exc}`,
+      };
+    }
+
+    if (parsed.type === 'execution_interrupted') {
+      return {
+        type: 'execution_interrupted',
+        promptId: data.prompt_id,
+        nodeId: data.node_id ?? data.node ?? null,
+        errorMessage: 'Генерация была прервана на сервере ComfyUI.',
       };
     }
 
@@ -1365,9 +1603,22 @@ async function executeSingleComfyWorkflow(
           detail: 'Получение MP4 из /history и /view...',
         });
         const history = await getHistory(serverUrl, promptId);
+        const execError = extractExecutionErrorFromHistory(history, promptId);
+        if (execError) {
+          fail(new Error(execError));
+          return true;
+        }
         const video = extractVideoOutputFromHistory(history, promptId, serverUrl);
         if (video) {
           succeed(video);
+          return true;
+        }
+        if (isHistoryPromptFinished(history, promptId)) {
+          fail(
+            new Error(
+              'ComfyUI завершил выполнение графа, но не вернул видеофайл. Проверьте узел экспорта видео (VHS_VideoCombine / SaveVideo) в консоли ComfyUI.',
+            ),
+          );
           return true;
         }
         return false;
@@ -1389,7 +1640,7 @@ async function executeSingleComfyWorkflow(
         if (typeof event.data !== 'string') return;
         const parsed = parseComfyWsEvent(event.data, promptId);
 
-        if (parsed.type === 'execution_error') {
+        if (parsed.type === 'execution_error' || parsed.type === 'execution_interrupted') {
           fail(new Error(parsed.errorMessage || 'Ошибка выполнения графа ComfyUI.'));
           return;
         }
@@ -1426,6 +1677,9 @@ async function executeSingleComfyWorkflow(
       ws.onerror = () => {
         wsConnected = false;
       };
+      ws.onclose = () => {
+        wsConnected = false;
+      };
     }
 
     pollTimer = setInterval(async () => {
@@ -1433,9 +1687,22 @@ async function executeSingleComfyWorkflow(
       try {
         const history = await getHistory(serverUrl, promptId);
         if (history[promptId]) {
+          const execError = extractExecutionErrorFromHistory(history, promptId);
+          if (execError) {
+            fail(new Error(execError));
+            return;
+          }
           const video = extractVideoOutputFromHistory(history, promptId, serverUrl);
           if (video) {
             succeed(video);
+            return;
+          }
+          if (isHistoryPromptFinished(history, promptId)) {
+            fail(
+              new Error(
+                'ComfyUI завершил выполнение графа, но не вернул видеофайл. Проверьте узел экспорта видео (VHS_VideoCombine / SaveVideo) в консоли ComfyUI.',
+              ),
+            );
             return;
           }
         }
@@ -1510,6 +1777,22 @@ export async function runComfyGeneration(
     throw new Error('В режиме «Оживление фото» загрузите стартовый кадр (Start Frame).');
   }
 
+  // Catch HTTPS -> HTTP Mixed Content immediately in browser preview before firing fetch/WebSocket.
+  if (
+    typeof window !== 'undefined' &&
+    !getElectronComfyBridge() &&
+    window.location?.protocol === 'https:' &&
+    /^http:\/\//i.test(serverUrl)
+  ) {
+    throw new Error(
+      classifyConnectionError({
+        serverUrl,
+        isElectron: false,
+        pageProtocol: 'https:',
+      }),
+    );
+  }
+
   const preflightReport = await runPreflight(
     serverUrl,
     buildPreflightGraphs({
@@ -1523,6 +1806,9 @@ export async function runComfyGeneration(
     throw new PreflightError(preflightReport);
   }
   const videoExportBackend: VideoExportBackend = preflightReport?.videoExportBackend ?? 'vhs';
+  const resolvedModelNames = preflightReport?.resolvedModelNames;
+  const coreVideoFormat = preflightReport?.coreVideoFormat;
+  const coreVideoCodec = preflightReport?.coreVideoCodec;
 
   const uploadedChars: WorkflowBuildCharacter[] = [];
 
@@ -1543,7 +1829,7 @@ export async function runComfyGeneration(
         identityAnchorCount: characters.length,
         message: `Загрузка референса ${i + 1} из ${characters.length}: ${char.name || char.file.name}`,
       });
-      const uploaded = await uploadImage(serverUrl, char.file, 'kinoflow_refs');
+      const uploaded = await uploadImage(serverUrl, char.file, 'kinoflow_ref');
       uploadedChars.push({
         name: char.name || `Персонаж ${i + 1}`,
         weight: char.weight,
@@ -1598,10 +1884,8 @@ export async function runComfyGeneration(
       segment.endSec,
     );
 
-    // Every chained 5s segment (2..6) and every Extend Scene continuation receives BOTH
-    // the previous segment's last frame AND the original uploaded character references
-    // with identity weight locked in [0.75, 0.85], and automatically routes to workflow_i2v.json
-    // + wan2.2_i2v_14B_fp8_e4m3fn.safetensors in Auto mode.
+    // Every chained 5s segment (2..6) and every Extend Scene continuation receives the
+    // previous segment's last frame and automatically routes to workflow_i2v.json.
     const route = resolveAutoModelRoute({
       modelId: settings.modelId,
       mode: segment.mode,
@@ -1627,6 +1911,9 @@ export async function runComfyGeneration(
       segmentIndex: segment.index,
       isContinuation,
       videoExportBackend,
+      resolvedModelNames,
+      coreVideoFormat,
+      coreVideoCodec,
     });
 
     const segStartPct = baseProgressOffset + (segment.index - 1) * perSegmentBudget;
@@ -1638,7 +1925,7 @@ export async function runComfyGeneration(
       totalSegments: segment.total,
       segmentStartSec: segment.startSec,
       segmentEndSec: segment.endSec,
-      segmentMode: segment.mode,
+      segmentMode: route.workflowMode,
       identityAnchorCount: uploadedChars.length,
       message: segmentLabel,
     });
@@ -1662,7 +1949,7 @@ export async function runComfyGeneration(
           totalSegments: segment.total,
           segmentStartSec: segment.startSec,
           segmentEndSec: segment.endSec,
-          segmentMode: segment.mode,
+          segmentMode: route.workflowMode,
           identityAnchorCount: uploadedChars.length,
           message: meta.detail ? `${segmentLabel} ${meta.detail}` : segmentLabel,
         });
@@ -1671,7 +1958,7 @@ export async function runComfyGeneration(
 
     renderedSegments.push({
       index: segment.index,
-      mode: segment.mode,
+      mode: route.workflowMode,
       startSec: segment.startSec,
       endSec: segment.endSec,
       promptId,

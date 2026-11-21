@@ -6,6 +6,7 @@ export interface ComfyBridgeRequestOptions {
   headers?: Record<string, string>;
   body?: string;
   timeoutMs?: number;
+  responseType?: 'text' | 'base64';
   multipart?: {
     fieldName: string;
     fileName: string;
@@ -20,6 +21,8 @@ export interface ComfyBridgeResponse {
   status: number;
   statusText: string;
   bodyText: string;
+  bodyBase64?: string;
+  contentType?: string;
   networkError: boolean;
   errorCode?: string;
   errorMessage?: string;

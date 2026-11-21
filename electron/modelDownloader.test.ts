@@ -14,7 +14,7 @@ import {
 } from './modelCatalog.js';
 import { ModelDownloadManager, scanModelsDirectory } from './modelDownloader.js';
 
-test('REQUIRED_MODELS includes official Wan 2.2 T2V/I2V FP8, UMT5-XXL FP8, Wan 2.1 VAE, and CLIP Vision H', () => {
+test('REQUIRED_MODELS includes official Wan 2.2 T2V/I2V FP8, UMT5-XXL FP8, and Wan 2.1 VAE without unused CLIP Vision', () => {
   const filenames = REQUIRED_MODELS.map((m) => m.filename);
   assert.ok(filenames.includes('wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors'));
   assert.ok(filenames.includes('wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors'));
@@ -22,7 +22,7 @@ test('REQUIRED_MODELS includes official Wan 2.2 T2V/I2V FP8, UMT5-XXL FP8, Wan 2
   assert.ok(filenames.includes('wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors'));
   assert.ok(filenames.includes('umt5_xxl_fp8_e4m3fn_scaled.safetensors'));
   assert.ok(filenames.includes('wan_2.1_vae.safetensors'));
-  assert.ok(filenames.includes('clip_vision_h.safetensors'));
+  assert.ok(!filenames.includes('clip_vision_h.safetensors'));
 
   for (const model of REQUIRED_MODELS) {
     assert.ok(model.downloadUrl.startsWith('https://huggingface.co/Comfy-Org/'));
@@ -31,11 +31,18 @@ test('REQUIRED_MODELS includes official Wan 2.2 T2V/I2V FP8, UMT5-XXL FP8, Wan 2
   }
 });
 
-test('evaluateModelFileStatus detects installed, size_mismatch, partial, and missing accurately', () => {
+test('evaluateModelFileStatus detects installed, size_mismatch, partial, missing, and tolerates minor metadata drift on large models', () => {
   assert.equal(evaluateModelFileStatus(1000, 1000, 0), 'installed');
   assert.equal(evaluateModelFileStatus(1000, 500, 0), 'size_mismatch');
   assert.equal(evaluateModelFileStatus(1000, null, 250), 'partial');
   assert.equal(evaluateModelFileStatus(1000, null, 0), 'missing');
+
+  // Large 14 GB safetensors file with 4 KB metadata delta should still count as installed
+  const fourteenGb = 14_293_923_632;
+  assert.equal(evaluateModelFileStatus(fourteenGb, fourteenGb + 4096, 0), 'installed');
+  assert.equal(evaluateModelFileStatus(fourteenGb, fourteenGb - 4096, 0), 'installed');
+  // Truncated file (half size) must still report size_mismatch
+  assert.equal(evaluateModelFileStatus(fourteenGb, Math.floor(fourteenGb / 2), 0), 'size_mismatch');
 });
 
 test('formatBytes, formatSpeed, and formatEta format Russian telemetry strings cleanly', () => {

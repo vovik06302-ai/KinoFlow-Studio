@@ -78,22 +78,12 @@ export const REQUIRED_MODELS = [
       'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors',
     expectedSizeBytes: 253815318,
   },
-  {
-    id: 'clip-vision-h',
-    name: 'CLIP Vision H (clip_vision_h)',
-    category: 'CLIP Vision',
-    description: 'Энкодер референсных лиц персонажей (IP-Adapter / FaceID) и стартового кадра I2V.',
-    filename: 'clip_vision_h.safetensors',
-    targetSubfolder: 'models/clip_vision',
-    repoId: 'Comfy-Org/Wan_2.1_ComfyUI_repackaged',
-    downloadUrl:
-      'https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors',
-    expectedSizeBytes: 1264219396,
-  },
 ];
 
 /**
  * Evaluates installation status from disk stats of the target file and any resumable .part file.
+ * For large model weights (>= 1 MB), allows a small metadata tolerance (0.5% capped at 16 MiB)
+ * so valid upstream safetensors revisions are not mistakenly deleted, while truncated files are still caught.
  */
 export function evaluateModelFileStatus(
   expectedSizeBytes,
@@ -101,7 +91,11 @@ export function evaluateModelFileStatus(
   partialSizeBytes = 0,
 ) {
   if (typeof existingSizeBytes === 'number' && existingSizeBytes >= 0) {
-    if (existingSizeBytes === expectedSizeBytes) {
+    const tolerance =
+      expectedSizeBytes >= 1_000_000
+        ? Math.min(16 * 1024 * 1024, Math.floor(expectedSizeBytes * 0.005))
+        : 0;
+    if (Math.abs(existingSizeBytes - expectedSizeBytes) <= tolerance) {
       return 'installed';
     }
     return 'size_mismatch';
