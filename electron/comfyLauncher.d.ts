@@ -1,4 +1,7 @@
 export declare const LAUNCH_SCRIPT_NAMES: string[];
+export declare function buildComfyLaunchEnv(
+  baseEnv?: Record<string, string | undefined>,
+): Record<string, string | undefined>;
 export declare function findLaunchScript(comfyDir: string, fsImpl?: unknown): string | null;
 
 export type LauncherEvent =
@@ -19,6 +22,7 @@ export declare class ComfyLauncher {
     killImpl?: (child: unknown) => void;
     maxLogLines?: number;
     platform?: string;
+    baseEnv?: Record<string, string | undefined>;
   });
   subscribe(listener: (event: LauncherEvent) => void): () => void;
   getState(): LauncherState;

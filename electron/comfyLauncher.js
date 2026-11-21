@@ -12,6 +12,22 @@ export const LAUNCH_SCRIPT_NAMES = [
   'run_nvidia_gpu_fast_fp16_accumulation.bat',
 ];
 
+/**
+ * Environment overrides for running ComfyUI hidden behind pipes on Windows.
+ * Disabling console tqdm progress bars avoids OSError [Errno 22] Invalid argument
+ * during KSamplerAdvanced stderr.flush() calls (KinoFlow Studio reads step progress
+ * over WebSocket instead). UTF-8 flags prevent legacy Windows codepage crashes.
+ */
+export function buildComfyLaunchEnv(baseEnv = process.env) {
+  return {
+    ...baseEnv,
+    PYTHONUTF8: '1',
+    PYTHONIOENCODING: 'utf-8:replace',
+    PYTHONUNBUFFERED: '1',
+    TQDM_DISABLE: '1',
+  };
+}
+
 /** The .bat lives next to the `ComfyUI` folder, so the folder itself and two parents are checked. */
 export function findLaunchScript(comfyDir, fsImpl = fs) {
   if (typeof comfyDir !== 'string' || !comfyDir.trim()) return null;
@@ -40,11 +56,18 @@ function defaultKill(child) {
 }
 
 export class ComfyLauncher {
-  constructor({ spawnImpl = spawn, killImpl = defaultKill, maxLogLines = 500, platform = process.platform } = {}) {
+  constructor({
+    spawnImpl = spawn,
+    killImpl = defaultKill,
+    maxLogLines = 500,
+    platform = process.platform,
+    baseEnv = process.env,
+  } = {}) {
     this.spawnImpl = spawnImpl;
     this.killImpl = killImpl;
     this.maxLogLines = maxLogLines;
     this.platform = platform;
+    this.baseEnv = baseEnv;
     this.child = null;
     this.scriptPath = null;
     this.logs = [];
@@ -102,6 +125,8 @@ export class ComfyLauncher {
       child = this.spawnImpl('cmd.exe', ['/c', path.basename(scriptPath)], {
         cwd: path.dirname(scriptPath),
         windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: buildComfyLaunchEnv(this.baseEnv),
       });
     } catch (error) {
       return { ok: false, error: String(error?.message ?? error) };

@@ -1,7 +1,7 @@
 {
   "name": "kinoflow-studio",
   "private": true,
-  "version": "1.2.7",
+  "version": "1.2.71",
   "description": "KinoFlow Studio desktop and web client for local ComfyUI video generation",
   "type": "module",
   "main": "electron/main.js",

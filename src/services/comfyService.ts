@@ -28,6 +28,22 @@ export const DURATION_CHOICES: DurationChoice[] = [5, 10, 15, 20, 25, 30];
 export const FPS_CHOICES: FpsChoice[] = [16, 24];
 export const RIFE_FPS_CHOICES: RifeTargetFps[] = [24, 30];
 
+export const GENERATION_PARAM_LIMITS = {
+  minSteps: 4,
+  maxSteps: 100,
+  minFrames: 17,
+  maxFrames: 241,
+  frameAlignmentStep: 4,
+  minDimension: 256,
+  maxDimension: 1920,
+  dimensionMultiple: 16,
+  minSeed: 0,
+  maxSeed: 4_294_967_295,
+  maxCharacters: 3,
+  minCharacterWeight: 0,
+  maxCharacterWeight: 1,
+} as const;
+
 /** RIFE doubles the number of frames, so the playback rate must double as well. */
 export const RIFE_MULTIPLIER = 2;
 
@@ -265,6 +281,52 @@ export interface ParsedWsEvent {
   errorMessage?: string;
 }
 
+export interface GenerationParamValidationIssue {
+  field:
+    | 'settings'
+    | 'mode'
+    | 'modelId'
+    | 'serverUrl'
+    | 'durationSec'
+    | 'fps'
+    | 'frames'
+    | 'width'
+    | 'height'
+    | 'steps'
+    | 'seed'
+    | 'rifeEnabled'
+    | 'rifeTargetFps'
+    | 'positivePrompt'
+    | 'negativePrompt'
+    | 'startFrame'
+    | 'characters';
+  message: string;
+}
+
+export interface GenerationParamValidationResult {
+  valid: boolean;
+  issues: GenerationParamValidationIssue[];
+}
+
+export interface ValidateGenerationParamsInput {
+  settings: Partial<GenerationSettings> | null | undefined;
+  positivePrompt?: unknown;
+  negativePrompt?: unknown;
+  hasStartFrame?: boolean;
+  characters?: unknown;
+}
+
+export class GenerationParamsValidationError extends Error {
+  readonly issues: GenerationParamValidationIssue[];
+
+  constructor(issues: GenerationParamValidationIssue[]) {
+    const details = issues.map((issue) => issue.message).join('; ');
+    super(`Некорректные параметры генерации: ${details}`);
+    this.name = 'GenerationParamsValidationError';
+    this.issues = issues;
+  }
+}
+
 export function getModelOption(modelId: BaseModelId | string): VideoModelOption {
   return VIDEO_MODELS.find((m) => m.id === modelId) ?? VIDEO_MODELS[0];
 }
@@ -293,6 +355,224 @@ export function secondsToAlignedFrames(seconds: number, fps: number = 16): numbe
   const rawFrames = Math.round(clampedSeconds * fps);
   const n = Math.max(4, Math.round((rawFrames - 1) / 4));
   return n * 4 + 1;
+}
+
+/**
+ * Validates generation parameter types and ranges on the client before any upload,
+ * preflight, or `/prompt` request is sent to ComfyUI.
+ */
+export function validateGenerationParams(
+  input: ValidateGenerationParamsInput,
+): GenerationParamValidationResult {
+  const issues: GenerationParamValidationIssue[] = [];
+  const settings = input?.settings;
+
+  if (!settings || typeof settings !== 'object') {
+    issues.push({
+      field: 'settings',
+      message: 'Параметры генерации (settings) не переданы.',
+    });
+    return { valid: false, issues };
+  }
+
+  if (settings.mode !== 't2v' && settings.mode !== 'i2v') {
+    issues.push({
+      field: 'mode',
+      message: 'Режим генерации (mode) должен быть «t2v» или «i2v».',
+    });
+  }
+
+  if (
+    typeof settings.modelId !== 'string' ||
+    !VIDEO_MODELS.some((model) => model.id === settings.modelId)
+  ) {
+    issues.push({
+      field: 'modelId',
+      message: 'Выбрана неподдерживаемая видеомодель (modelId).',
+    });
+  }
+
+  if (typeof settings.serverUrl !== 'string' || !settings.serverUrl.trim()) {
+    issues.push({
+      field: 'serverUrl',
+      message: 'Адрес сервера ComfyUI (serverUrl) должен быть непустой строкой.',
+    });
+  } else {
+    const rawUrl = settings.serverUrl.trim();
+    if (/\s/.test(rawUrl)) {
+      issues.push({
+        field: 'serverUrl',
+        message: 'Адрес сервера ComfyUI (serverUrl) не должен содержать пробелы.',
+      });
+    } else {
+      try {
+        const parsed = new URL(normalizeBaseUrl(rawUrl));
+        if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname) {
+          issues.push({
+            field: 'serverUrl',
+            message: 'Адрес сервера ComfyUI (serverUrl) должен быть корректным HTTP/HTTPS URL.',
+          });
+        }
+      } catch {
+        issues.push({
+          field: 'serverUrl',
+          message: 'Адрес сервера ComfyUI (serverUrl) имеет некорректный формат URL.',
+        });
+      }
+    }
+  }
+
+  if (
+    typeof settings.durationSec !== 'number' ||
+    !Number.isInteger(settings.durationSec) ||
+    !DURATION_CHOICES.includes(settings.durationSec as DurationChoice)
+  ) {
+    issues.push({
+      field: 'durationSec',
+      message: `Длительность (durationSec) должна быть одним из значений: ${DURATION_CHOICES.join(', ')} сек.`,
+    });
+  }
+
+  if (
+    typeof settings.fps !== 'number' ||
+    !Number.isInteger(settings.fps) ||
+    !FPS_CHOICES.includes(settings.fps as FpsChoice)
+  ) {
+    issues.push({
+      field: 'fps',
+      message: `Частота кадров (fps) должна быть одним из значений: ${FPS_CHOICES.join(', ')}.`,
+    });
+  }
+
+  if (
+    typeof settings.frames !== 'number' ||
+    !Number.isInteger(settings.frames) ||
+    settings.frames < GENERATION_PARAM_LIMITS.minFrames ||
+    settings.frames > GENERATION_PARAM_LIMITS.maxFrames ||
+    (settings.frames - 1) % GENERATION_PARAM_LIMITS.frameAlignmentStep !== 0
+  ) {
+    issues.push({
+      field: 'frames',
+      message: `Количество кадров (frames) должно быть целым числом вида 4n + 1 в диапазоне ${GENERATION_PARAM_LIMITS.minFrames}–${GENERATION_PARAM_LIMITS.maxFrames}.`,
+    });
+  }
+
+  const validateDimension = (field: 'width' | 'height', value: unknown, label: string) => {
+    if (
+      typeof value !== 'number' ||
+      !Number.isInteger(value) ||
+      value < GENERATION_PARAM_LIMITS.minDimension ||
+      value > GENERATION_PARAM_LIMITS.maxDimension ||
+      value % GENERATION_PARAM_LIMITS.dimensionMultiple !== 0
+    ) {
+      issues.push({
+        field,
+        message: `${label} (${field}) должна быть целым числом в диапазоне ${GENERATION_PARAM_LIMITS.minDimension}–${GENERATION_PARAM_LIMITS.maxDimension}, кратным ${GENERATION_PARAM_LIMITS.dimensionMultiple}.`,
+      });
+    }
+  };
+  validateDimension('width', settings.width, 'Ширина');
+  validateDimension('height', settings.height, 'Высота');
+
+  if (
+    typeof settings.steps !== 'number' ||
+    !Number.isInteger(settings.steps) ||
+    settings.steps < GENERATION_PARAM_LIMITS.minSteps ||
+    settings.steps > GENERATION_PARAM_LIMITS.maxSteps
+  ) {
+    issues.push({
+      field: 'steps',
+      message: `Количество шагов (steps) должно быть целым числом в диапазоне ${GENERATION_PARAM_LIMITS.minSteps}–${GENERATION_PARAM_LIMITS.maxSteps}.`,
+    });
+  }
+
+  if (
+    typeof settings.seed !== 'number' ||
+    !Number.isInteger(settings.seed) ||
+    settings.seed < GENERATION_PARAM_LIMITS.minSeed ||
+    settings.seed > GENERATION_PARAM_LIMITS.maxSeed
+  ) {
+    issues.push({
+      field: 'seed',
+      message: `Seed должен быть целым числом в диапазоне ${GENERATION_PARAM_LIMITS.minSeed}–${GENERATION_PARAM_LIMITS.maxSeed}.`,
+    });
+  }
+
+  if (settings.rifeEnabled !== undefined && typeof settings.rifeEnabled !== 'boolean') {
+    issues.push({
+      field: 'rifeEnabled',
+      message: 'Параметр RIFE (rifeEnabled) должен быть логическим значением.',
+    });
+  } else if (
+    settings.rifeEnabled === true &&
+    (typeof settings.rifeTargetFps !== 'number' ||
+      !Number.isInteger(settings.rifeTargetFps) ||
+      !RIFE_FPS_CHOICES.includes(settings.rifeTargetFps as RifeTargetFps))
+  ) {
+    issues.push({
+      field: 'rifeTargetFps',
+      message: `Целевой FPS для RIFE (rifeTargetFps) должен быть одним из значений: ${RIFE_FPS_CHOICES.join(', ')}.`,
+    });
+  }
+
+  if (input.positivePrompt !== undefined) {
+    if (typeof input.positivePrompt !== 'string' || !input.positivePrompt.trim()) {
+      issues.push({
+        field: 'positivePrompt',
+        message: 'Промпт сцены (positivePrompt) должен быть непустой строкой.',
+      });
+    }
+  }
+
+  if (input.negativePrompt !== undefined && typeof input.negativePrompt !== 'string') {
+    issues.push({
+      field: 'negativePrompt',
+      message: 'Негативный промпт (negativePrompt) должен быть строкой.',
+    });
+  }
+
+  if (settings.mode === 'i2v' && input.hasStartFrame === false) {
+    issues.push({
+      field: 'startFrame',
+      message: 'В режиме «Оживление фото» загрузите стартовый кадр (Start Frame).',
+    });
+  }
+
+  if (input.characters !== undefined) {
+    if (!Array.isArray(input.characters)) {
+      issues.push({
+        field: 'characters',
+        message: 'Список референсов персонажей (characters) должен быть массивом.',
+      });
+    } else {
+      if (input.characters.length > GENERATION_PARAM_LIMITS.maxCharacters) {
+        issues.push({
+          field: 'characters',
+          message: `Допускается не более ${GENERATION_PARAM_LIMITS.maxCharacters} референсов персонажей.`,
+        });
+      }
+      input.characters.forEach((char, index) => {
+        const weight =
+          char && typeof char === 'object' ? (char as { weight?: unknown }).weight : undefined;
+        if (
+          typeof weight !== 'number' ||
+          !Number.isFinite(weight) ||
+          weight < GENERATION_PARAM_LIMITS.minCharacterWeight ||
+          weight > GENERATION_PARAM_LIMITS.maxCharacterWeight
+        ) {
+          issues.push({
+            field: 'characters',
+            message: `Вес персонажа #${index + 1} должен быть числом от ${GENERATION_PARAM_LIMITS.minCharacterWeight} до ${GENERATION_PARAM_LIMITS.maxCharacterWeight}.`,
+          });
+        }
+      });
+    }
+  }
+
+  return {
+    valid: issues.length === 0,
+    issues,
+  };
 }
 
 /**
@@ -1357,6 +1637,62 @@ interface HistoryStatusEntry {
   messages?: Array<[string, Record<string, unknown>?]>;
 }
 
+function extractTracebackLocation(traceback: unknown): string | null {
+  if (!Array.isArray(traceback) || traceback.length === 0) return null;
+  for (let i = traceback.length - 1; i >= 0; i -= 1) {
+    const entry = traceback[i];
+    if (typeof entry !== 'string') continue;
+    const match = /File "([^"]+)", line (\d+)(?:, in ([^\r\n]+))?/.exec(entry);
+    if (!match) continue;
+    const normalizedPath = match[1].replace(/\\/g, '/');
+    const parts = normalizedPath.split('/').filter(Boolean);
+    const shortPath = parts.slice(-2).join('/') || normalizedPath;
+    const fnName = match[3]?.trim();
+    return fnName ? `${shortPath}:${match[2]} in ${fnName}` : `${shortPath}:${match[2]}`;
+  }
+  return null;
+}
+
+export function formatComfyExecutionError(params: {
+  nodeId?: unknown;
+  nodeType?: string;
+  exceptionMessage?: unknown;
+  traceback?: unknown;
+}): string {
+  const nodeId =
+    params.nodeId !== undefined && params.nodeId !== null && String(params.nodeId).trim()
+      ? String(params.nodeId).trim()
+      : null;
+  const nodeType = typeof params.nodeType === 'string' && params.nodeType.trim() ? params.nodeType.trim() : undefined;
+  const exc =
+    typeof params.exceptionMessage === 'string' && params.exceptionMessage.trim()
+      ? params.exceptionMessage.trim()
+      : 'Ошибка выполнения узла в ComfyUI.';
+  const nodePrefix = nodeId
+    ? `Узел #${nodeId}${nodeType ? ` (${nodeType})` : ''}: `
+    : nodeType
+      ? `${nodeType}: `
+      : '';
+
+  const location = extractTracebackLocation(params.traceback);
+  const tracebackText = Array.isArray(params.traceback)
+    ? params.traceback.filter((item): item is string => typeof item === 'string').join('\n')
+    : '';
+  const baseMessage = location
+    ? `Ошибка ComfyUI · ${nodePrefix}${exc} [${location}]`
+    : `Ошибка ComfyUI · ${nodePrefix}${exc}`;
+
+  if (/errno\s*22|invalid argument/i.test(exc)) {
+    const isConsoleStreamCrash = /tqdm|flush|stdout|stderr|logger|prestartup_script/i.test(tracebackText);
+    if (isConsoleStreamCrash) {
+      return `${baseMessage}. Сбой консольного вывода прогресса в Windows — перезапустите ComfyUI из KinoFlow Studio или обновите ComfyUI и ComfyUI-Manager.`;
+    }
+    return `${baseMessage}. Возможные причины на Windows: сбой консольного прогресс-бара (перезапустите ComfyUI из KinoFlow Studio или обновите ComfyUI/Manager), расположение ComfyUI в OneDrive либо повреждённый файл модели.`;
+  }
+
+  return baseMessage;
+}
+
 /**
  * Inspects `/history/{prompt_id}` status block for ComfyUI execution errors or interruptions
  * so failed workflows surface immediately instead of polling indefinitely.
@@ -1374,18 +1710,12 @@ export function extractExecutionErrorFromHistory(
       if (!Array.isArray(msg)) continue;
       const [eventType, payload] = msg;
       if (eventType === 'execution_error') {
-        const nodeId = payload?.node_id ?? payload?.node;
-        const nodeType = typeof payload?.node_type === 'string' ? payload.node_type : undefined;
-        const exc =
-          typeof payload?.exception_message === 'string' && payload.exception_message.trim()
-            ? payload.exception_message.trim()
-            : 'Ошибка выполнения узла в ComfyUI.';
-        const nodePrefix = nodeId
-          ? `Узел #${nodeId}${nodeType ? ` (${nodeType})` : ''}: `
-          : nodeType
-            ? `${nodeType}: `
-            : '';
-        return `Ошибка ComfyUI · ${nodePrefix}${exc}`;
+        return formatComfyExecutionError({
+          nodeId: payload?.node_id ?? payload?.node,
+          nodeType: typeof payload?.node_type === 'string' ? payload.node_type : undefined,
+          exceptionMessage: payload?.exception_message,
+          traceback: payload?.traceback,
+        });
       }
       if (eventType === 'execution_interrupted') {
         return 'Генерация была прервана на сервере ComfyUI.';
@@ -1429,6 +1759,7 @@ export function parseComfyWsEvent(rawMessage: string, expectedPromptId?: string)
         value?: number;
         max?: number;
         exception_message?: string;
+        traceback?: string[];
       };
     };
 
@@ -1466,18 +1797,17 @@ export function parseComfyWsEvent(rawMessage: string, expectedPromptId?: string)
     if (parsed.type === 'execution_error') {
       const nodeId = data.node_id ?? data.node ?? null;
       const nodeType = data.node_type;
-      const exc = data.exception_message?.trim() || 'Ошибка выполнения узла в ComfyUI.';
-      const nodePrefix = nodeId
-        ? `Узел #${nodeId}${nodeType ? ` (${nodeType})` : ''}: `
-        : nodeType
-          ? `${nodeType}: `
-          : '';
       return {
         type: 'execution_error',
         promptId: data.prompt_id,
         nodeId,
         nodeType,
-        errorMessage: `Ошибка ComfyUI · ${nodePrefix}${exc}`,
+        errorMessage: formatComfyExecutionError({
+          nodeId,
+          nodeType,
+          exceptionMessage: data.exception_message,
+          traceback: data.traceback,
+        }),
       };
     }
 
@@ -1770,12 +2100,19 @@ export async function runComfyGeneration(
     signal,
     onProgress,
   } = options;
+  const validation = validateGenerationParams({
+    settings,
+    positivePrompt,
+    negativePrompt,
+    hasStartFrame: Boolean(startFrame),
+    characters,
+  });
+  if (!validation.valid) {
+    throw new GenerationParamsValidationError(validation.issues);
+  }
+
   const serverUrl = normalizeBaseUrl(settings.serverUrl);
   const plannedSegments = planGenerationSegments(settings.durationSec, settings.mode);
-
-  if (settings.mode === 'i2v' && !startFrame) {
-    throw new Error('В режиме «Оживление фото» загрузите стартовый кадр (Start Frame).');
-  }
 
   // Catch HTTPS -> HTTP Mixed Content immediately in browser preview before firing fetch/WebSocket.
   if (

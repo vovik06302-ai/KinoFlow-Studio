@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ComfyLauncher, findLaunchScript } from './comfyLauncher.js';
+import { ComfyLauncher, buildComfyLaunchEnv, findLaunchScript } from './comfyLauncher.js';
 
 type FakeChild = EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; pid: number };
 function fakeChild(): FakeChild {
@@ -14,6 +14,16 @@ function fakeChild(): FakeChild {
   child.pid = 4242;
   return child;
 }
+
+test('buildComfyLaunchEnv disables tqdm and enforces UTF-8 stdio without dropping existing env', () => {
+  const env = buildComfyLaunchEnv({ PATH: 'C:\\Windows\\System32', CUSTOM_VAR: 'ok' });
+  assert.equal(env.PATH, 'C:\\Windows\\System32');
+  assert.equal(env.CUSTOM_VAR, 'ok');
+  assert.equal(env.TQDM_DISABLE, '1');
+  assert.equal(env.PYTHONUTF8, '1');
+  assert.equal(env.PYTHONIOENCODING, 'utf-8:replace');
+  assert.equal(env.PYTHONUNBUFFERED, '1');
+});
 
 test('findLaunchScript finds run_nvidia_gpu.bat next to the ComfyUI folder', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kf-comfy-'));
@@ -34,12 +44,23 @@ test('findLaunchScript finds run_nvidia_gpu.bat next to the ComfyUI folder', () 
 
 test('ComfyLauncher streams complete log lines, keeps a bounded buffer and reports exit', () => {
   const child = fakeChild();
-  const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+  const calls: Array<{
+    command: string;
+    args: string[];
+    cwd?: string;
+    stdio?: unknown;
+    env?: Record<string, string | undefined>;
+  }> = [];
   const launcher = new ComfyLauncher({
     platform: 'win32',
     maxLogLines: 3,
-    spawnImpl: (command: string, args: string[], options: { cwd?: string }) => {
-      calls.push({ command, args, cwd: options.cwd });
+    baseEnv: { SYSTEMROOT: 'C:\\Windows' },
+    spawnImpl: (
+      command: string,
+      args: string[],
+      options: { cwd?: string; stdio?: unknown; env?: Record<string, string | undefined> },
+    ) => {
+      calls.push({ command, args, cwd: options.cwd, stdio: options.stdio, env: options.env });
       return child;
     },
   });
@@ -51,6 +72,10 @@ test('ComfyLauncher streams complete log lines, keeps a bounded buffer and repor
   assert.equal(calls[0].command, 'cmd.exe');
   assert.deepEqual(calls[0].args, ['/c', 'run_nvidia_gpu.bat']);
   assert.equal(calls[0].cwd, path.dirname(script));
+  assert.deepEqual(calls[0].stdio, ['ignore', 'pipe', 'pipe']);
+  assert.equal(calls[0].env?.TQDM_DISABLE, '1');
+  assert.equal(calls[0].env?.PYTHONUTF8, '1');
+  assert.equal(calls[0].env?.SYSTEMROOT, 'C:\\Windows');
   assert.equal(launcher.start(script).ok, false, 'second start is rejected while running');
 
   child.stdout.emit('data', 'Starting server\nTo see the GUI go to: http://127.0.0.1:8188\npartial');

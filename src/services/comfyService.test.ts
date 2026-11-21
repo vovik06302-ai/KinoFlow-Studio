@@ -6,6 +6,7 @@ import {
   AUTO_T2V_LOW_MODEL_FILE,
   AUTO_T2V_MODEL_FILE,
   DEFAULT_NEGATIVE_PROMPT,
+  GenerationParamsValidationError,
   applyShootingStyleToPrompt,
   buildRootUploadFilename,
   buildWorkflowFromTemplate,
@@ -25,8 +26,10 @@ import {
   parseComfyWsEvent,
   planGenerationSegments,
   resolveAutoModelRoute,
+  runComfyGeneration,
   secondsToAlignedFrames,
   toWebSocketUrl,
+  validateGenerationParams,
 } from './comfyService';
 import { buildModelResolutionKey } from './preflightService';
 import type { GenerationSettings } from '../types/video';
@@ -638,5 +641,141 @@ test('formatGenerationErrorMessage preserves ComfyUI errors without bogus CORS s
   assert.match(electronNet, /порт закрыт/i);
   assert.ok(!electronNet.includes('--enable-cors-header'));
 });
+
+test('extractExecutionErrorFromHistory and parseComfyWsEvent surface traceback origin and Windows Errno 22 guidance', () => {
+  const wsErrno22Tqdm = parseComfyWsEvent(
+    JSON.stringify({
+      type: 'execution_error',
+      data: {
+        prompt_id: 'p-22',
+        node_id: '40',
+        node_type: 'KSamplerAdvanced',
+        exception_message: '[Errno 22] Invalid argument',
+        traceback: [
+          '  File "C:\\ComfyUI\\execution.py", line 327, in execute\n',
+          '  File "C:\\ComfyUI\\python_embeded\\Lib\\site-packages\\tqdm\\std.py", line 1181, in __iter__\n    self.fp.flush()\n',
+        ],
+      },
+    }),
+    'p-22',
+  );
+  assert.equal(wsErrno22Tqdm.type, 'execution_error');
+  assert.match(wsErrno22Tqdm.errorMessage ?? '', /Узел #40 \(KSamplerAdvanced\): \[Errno 22\] Invalid argument/);
+  assert.match(wsErrno22Tqdm.errorMessage ?? '', /tqdm\/std\.py:1181 in __iter__/);
+  assert.match(wsErrno22Tqdm.errorMessage ?? '', /консольного вывода прогресса/i);
+
+  const historyErrno22Generic = extractExecutionErrorFromHistory(
+    {
+      'p-22-h': {
+        status: {
+          status_str: 'error',
+          completed: false,
+          messages: [
+            [
+              'execution_error',
+              {
+                prompt_id: 'p-22-h',
+                node_id: '40',
+                node_type: 'KSamplerAdvanced',
+                exception_message: '[Errno 22] Invalid argument',
+              },
+            ],
+          ],
+        },
+      },
+    },
+    'p-22-h',
+  );
+  assert.ok(historyErrno22Generic);
+  assert.match(historyErrno22Generic, /OneDrive/);
+  assert.match(historyErrno22Generic, /перезапустите ComfyUI/i);
+});
+
+test('validateGenerationParams accepts valid settings and rejects invalid types and ranges', () => {
+  const okResult = validateGenerationParams({
+    settings: baseSettings,
+    positivePrompt: 'A slow tracking shot through a rainy Tokyo alley.',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    hasStartFrame: false,
+    characters: [{ name: 'Анна', weight: 0.8 }],
+  });
+  assert.equal(okResult.valid, true);
+  assert.deepEqual(okResult.issues, []);
+
+  const badResult = validateGenerationParams({
+    settings: {
+      ...baseSettings,
+      mode: 'i2v',
+      steps: 28.5,
+      frames: 80, // not 4n + 1
+      width: 830, // not divisible by 16
+      height: 128, // below minDimension
+      seed: -5,
+      fps: 30 as unknown as 16,
+      durationSec: 7 as unknown as 5,
+      serverUrl: 'http://bad host:8188',
+      rifeEnabled: true,
+      rifeTargetFps: 60 as unknown as 24,
+    },
+    positivePrompt: '   ',
+    negativePrompt: 123 as unknown as string,
+    hasStartFrame: false,
+    characters: [{ name: 'A', weight: 1.5 }],
+  });
+
+  assert.equal(badResult.valid, false);
+  const fields = new Set(badResult.issues.map((issue) => issue.field));
+  for (const expectedField of [
+    'steps',
+    'frames',
+    'width',
+    'height',
+    'seed',
+    'fps',
+    'durationSec',
+    'serverUrl',
+    'rifeTargetFps',
+    'positivePrompt',
+    'negativePrompt',
+    'startFrame',
+    'characters',
+  ]) {
+    assert.ok(fields.has(expectedField as never), `expected validation issue for "${expectedField}"`);
+  }
+
+  const nonNumericSteps = validateGenerationParams({
+    settings: {
+      ...baseSettings,
+      steps: '28' as unknown as number,
+      frames: Number.NaN,
+    },
+  });
+  assert.equal(nonNumericSteps.valid, false);
+  assert.ok(nonNumericSteps.issues.some((i) => i.field === 'steps'));
+  assert.ok(nonNumericSteps.issues.some((i) => i.field === 'frames'));
+});
+
+test('runComfyGeneration rejects invalid steps/frames before making any network request', async () => {
+  const controller = new AbortController();
+  await assert.rejects(
+    () =>
+      runComfyGeneration({
+        settings: { ...baseSettings, steps: 2, frames: 80 },
+        positivePrompt: 'Cinema shot',
+        negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+        characters: [],
+        signal: controller.signal,
+        onProgress: () => {},
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof GenerationParamsValidationError);
+      assert.ok(err.issues.some((issue) => issue.field === 'steps'));
+      assert.ok(err.issues.some((issue) => issue.field === 'frames'));
+      return true;
+    },
+  );
+});
+
+
 
 
