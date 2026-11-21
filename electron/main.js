@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, session, shell } from 'electron';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { UpdateManager } from './appUpdater.js';
@@ -22,6 +23,59 @@ const modelDownloadManager = new ModelDownloadManager();
 let ipcRegistered = false;
 let updaterRegistered = false;
 let mainWindowRef = null;
+
+// ---- Автозапуск ComfyUI вместе с программой ----
+const COMFY_AUTOSTART_PORT = 8188;
+
+function getSettingsPath() {
+  return path.join(app.getPath('userData'), 'launcher-settings.json');
+}
+
+function readSavedComfyDir() {
+  try {
+    const data = JSON.parse(fs.readFileSync(getSettingsPath(), 'utf-8'));
+    return typeof data?.comfyDir === 'string' ? data.comfyDir : '';
+  } catch {
+    return '';
+  }
+}
+
+function saveComfyDir(comfyDir) {
+  if (typeof comfyDir !== 'string' || !comfyDir.trim()) return;
+  try {
+    if (readSavedComfyDir() === comfyDir.trim()) return;
+    fs.writeFileSync(getSettingsPath(), JSON.stringify({ comfyDir: comfyDir.trim() }), 'utf-8');
+  } catch (error) {
+    logStartupError('saveComfyDir', error);
+  }
+}
+
+function isPortOpen(port, host = '127.0.0.1', timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ port, host });
+    const finish = (result) => {
+      socket.destroy();
+      resolve(result);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+async function autoStartComfy() {
+  try {
+    const comfyDir = readSavedComfyDir();
+    if (!comfyDir) return; // папка ещё не выбрана — запуск вручную один раз сохранит её
+    if (await isPortOpen(COMFY_AUTOSTART_PORT)) return; // ComfyUI уже работает
+    const scriptPath = findLaunchScript(comfyDir);
+    if (!scriptPath) return;
+    await comfyLauncher.start(scriptPath);
+  } catch (error) {
+    logStartupError('autoStartComfy', error);
+  }
+}
 
 function getStartupLogPath() {
   try {
@@ -167,11 +221,13 @@ function registerModelManagerIpc() {
   });
 
   ipcMain.handle('models:scan', async (_event, comfyDir) => {
+    saveComfyDir(comfyDir);
     return scanModelsDirectory(comfyDir);
   });
 
   ipcMain.handle('models:download', async (_event, payload) => {
     const { comfyDir, modelIds } = payload ?? {};
+    saveComfyDir(comfyDir);
     return modelDownloadManager.startQueue(comfyDir, modelIds);
   });
 
@@ -209,6 +265,7 @@ function registerLauncherIpc() {
   ipcMain.handle('comfy:launcher-state', async () => comfyLauncher.getState());
 
   ipcMain.handle('comfy:launcher-start', async (_event, comfyDir) => {
+    saveComfyDir(comfyDir);
     const scriptPath = findLaunchScript(typeof comfyDir === 'string' ? comfyDir : '');
     return comfyLauncher.start(scriptPath);
   });
@@ -476,6 +533,7 @@ if (hasSingleInstanceLock) {
       registerFilmIpc();
       registerLauncherIpc();
       createMainWindow();
+      void autoStartComfy();
 
       app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {
