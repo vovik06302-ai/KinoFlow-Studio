@@ -66,19 +66,16 @@ export function buildEnhancePromptMessages(body: EnhancePromptBody): {
 
   const characterSection =
     characters.length > 0
-      ? `Active character reference photos (MUST preserve these exact character names verbatim and maintain consistent facial identity/appearance from the reference reference photos):\\n${characters
-          .map(
-            (c, idx) =>
-              `- Character ${idx + 1}: "${c.name.trim()}" (IP-Adapter / FaceID identity weight: ${Number(c.weight).toFixed(2)})`
-          )
-          .join('\\n')}`
+      ? `Named characters (MUST preserve these exact character names verbatim; the first reference photo is used as the start frame, so keep their appearance consistent):\n${characters
+          .map((c, idx) => `- Character ${idx + 1}: "${c.name.trim()}"`)
+          .join('\n')}`
       : 'No named character reference photos attached.';
 
   const targetModel = typeof body.model === 'string' ? body.model : 'Wan 2.2';
   const durationInfo =
     typeof body.durationSec === 'number' ? `${body.durationSec}s scene` : '5s scene';
   const resolutionInfo = typeof body.resolution === 'string' ? body.resolution : '832x480';
-  
+
   const cameraCue = body.cameraMovement || 'natural cinematic camera movement';
   const lightingCue = body.lightingPreset || 'natural cinematic lighting';
 
@@ -96,7 +93,7 @@ export function buildEnhancePromptMessages(body: EnhancePromptBody): {
     'Translate the user scene description (typically in Russian) into a single, richly detailed live-action cinematic English prompt engineered for maximum photorealism.',
     'Strict rules:',
     '1. Output ONLY the final English prompt as one cohesive paragraph (100 to 165 words). No markdown, no quotes, no headings, no explanations.',
-    '2. Preserve EVERY character name provided in the user prompt or character reference list verbatim, and describe them as real photographed humans keeping consistent likeness to their reference photographs.',
+    '2. Preserve EVERY character name provided in the user prompt or character list verbatim, and describe them as real photographed humans with a consistent appearance.',
     '3. Always incorporate authentic live-action optical and physical realism details organically into the scene:',
     '   - Natural human skin texture with fine pores, subtle lines, realistic micro-expressions, and zero plastic or waxy sheen.',
     '   - Realistic physical fabric folds, garment weight, and natural stray hair strands moving naturally with air and body momentum.',
@@ -104,7 +101,7 @@ export function buildEnhancePromptMessages(body: EnhancePromptBody): {
     '   - Authentic optical depth of field, focus breathing, lens physics, and subtle organic film grain matching the requested shooting style.',
     '4. Structure chronologically: camera framing and movement -> characters and natural expressions -> continuous physical action -> environment and practical lighting -> optical/camera texture.',
     '5. NEVER use artificial buzzwords like "8k, unreal engine, octane render, masterpiece, hyperrealistic CGI". Write strictly as a real film camera capturing a real moment.',
-  ].join('\\n');
+  ].join('\n');
 
   const userMessage = [
     `Target video model: ${targetModel} (${resolutionInfo}, ${durationInfo})`,
@@ -113,14 +110,134 @@ export function buildEnhancePromptMessages(body: EnhancePromptBody): {
     `Visual style: ${styleLabel}`,
     `Optical style direction: ${styleCue}`,
     characterSection,
-    `Original scene description:\\n${rawPrompt}`,
-  ].join('\\n\\n');
+    `Original scene description:\n${rawPrompt}`,
+  ].join('\n\n');
 
   return { systemInstruction, userMessage };
 }
 
 function extractRawErrorText(error: unknown): string {
-  if (error instanceof Error) return error.//... (остальное без изменений)
+  if (error instanceof Error) return error.message || String(error);
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
 }
 
-// ... (продолжение файла с функциями ошибок и retry, которые остаются прежними)
+function detectStatus(rawText: string): number {
+  const text = rawText.toLowerCase();
+  if (text.includes('gemini_api_key is not configured')) return 500;
+  if (
+    text.includes('api key not valid') ||
+    text.includes('api_key_invalid') ||
+    text.includes('permission_denied') ||
+    /\b(401|403)\b/.test(text)
+  ) {
+    return 401;
+  }
+  if (text.includes('resource_exhausted') || text.includes('quota') || /\b429\b/.test(text)) return 429;
+  if (
+    text.includes('abort') ||
+    text.includes('timeout') ||
+    text.includes('timed out') ||
+    text.includes('deadline')
+  ) {
+    return 504;
+  }
+  if (text.includes('unavailable') || text.includes('overloaded') || /\b(500|502|503)\b/.test(text)) {
+    return 503;
+  }
+  return 502;
+}
+
+export function formatGeminiEnhanceError(error: unknown): { status: number; message: string } {
+  const raw = extractRawErrorText(error);
+  const status = detectStatus(raw);
+
+  switch (status) {
+    case 401:
+      return {
+        status,
+        message: 'Ключ Gemini API недействителен или не имеет доступа. Проверьте GEMINI_API_KEY в .env.',
+      };
+    case 429:
+      return {
+        status,
+        message: 'Превышен лимит запросов Gemini API. Подождите минуту и попробуйте снова.',
+      };
+    case 504:
+      return {
+        status,
+        message: 'Gemini не ответил вовремя. Попробуйте ещё раз.',
+      };
+    case 503:
+      return {
+        status,
+        message: 'Сервис Gemini временно перегружен. Попробуйте ещё раз через несколько секунд.',
+      };
+    case 500:
+      return {
+        status,
+        message: 'GEMINI_API_KEY не задан на сервере. Добавьте ключ в файл .env и перезапустите приложение.',
+      };
+    default:
+      return {
+        status,
+        message: `Не удалось улучшить промпт: ${raw.slice(0, 300)}`,
+      };
+  }
+}
+
+function isRetryable(error: unknown): boolean {
+  const status = detectStatus(extractRawErrorText(error));
+  return status === 429 || status === 503 || status === 504;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function cleanEnhancedText(text: string): string {
+  return text
+    .replace(/^```[a-z]*\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .replace(/^["'«»“”]+|["'«»“”]+$/g, '')
+    .replace(/\s*\n+\s*/g, ' ')
+    .trim();
+}
+
+export async function enhancePromptWithRetry(
+  generator: GeminiTextGenerator,
+  messages: { systemInstruction: string; userMessage: string },
+  models: readonly string[] = ENHANCE_PROMPT_MODELS,
+  attemptsPerModel = 2,
+): Promise<string> {
+  let lastError: unknown = new Error('Не удалось улучшить промпт.');
+
+  for (const model of models) {
+    for (let attempt = 0; attempt < attemptsPerModel; attempt += 1) {
+      try {
+        const text = await generator.generateText({
+          model,
+          contents: messages.userMessage,
+          systemInstruction: messages.systemInstruction,
+        });
+        const cleaned = cleanEnhancedText(text ?? '');
+        if (!cleaned) {
+          throw new Error('Gemini вернул пустой ответ.');
+        }
+        return cleaned;
+      } catch (error) {
+        lastError = error;
+        if (!isRetryable(error)) break; // неисправимая ошибка — пробуем следующую модель
+        if (attempt < attemptsPerModel - 1) {
+          await sleep(800 * (attempt + 1));
+        }
+      }
+    }
+  }
+
+  throw lastError;
+}
