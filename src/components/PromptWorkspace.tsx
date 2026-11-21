@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronUp, Loader2, RotateCcw, Wand2 } from 'lucide-react';
-import { CAMERA_MOVEMENTS, LIGHTING_PRESETS } from '../serverPromptHelper';
+import { CAMERA_MOVEMENTS, LIGHTING_PRESETS } from '../../serverPromptHelper';
 import type { CharacterReference } from '../types/video';
 
 interface PromptWorkspaceProps {
@@ -108,7 +108,7 @@ export function PromptWorkspace({
         rows={5}
         value={prompt}
         disabled={disabled || isEnhancing}
-        onChange={(e) => onPromptLChange(e.target.value)}
+        onChange={(e) => onPromptChange(e.target.value)}
         placeholder="Опишите движение камеры, освещение и действия персонажей..."
         className="w-full resize-y rounded-md border border-[#262C3A] bg-[#141821] px-3.5 py-2.5 text-sm leading-relaxed text-[#F1F5F9] placeholder-[#475569] transition-colors focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
       />

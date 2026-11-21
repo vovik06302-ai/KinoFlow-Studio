@@ -190,9 +190,18 @@ export function formatGeminiEnhanceError(error: unknown): { status: number; mess
   }
 }
 
-function isRetryable(error: unknown): boolean {
+/** Временные ошибки Gemini (лимит, перегрузка, таймаут), которые имеет смысл повторить. */
+export function isTransientGeminiError(error: unknown): boolean {
   const status = detectStatus(extractRawErrorText(error));
   return status === 429 || status === 503 || status === 504;
+}
+
+export interface EnhancePromptRetryOptions {
+  models?: readonly string[];
+  /** Пауза между повторами в мс (умножается на номер попытки). По умолчанию 800. */
+  retryDelayMs?: number;
+  /** Сколько раз пробовать каждую модель. По умолчанию 2. */
+  attemptsPerModel?: number;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -211,9 +220,11 @@ function cleanEnhancedText(text: string): string {
 export async function enhancePromptWithRetry(
   generator: GeminiTextGenerator,
   messages: { systemInstruction: string; userMessage: string },
-  models: readonly string[] = ENHANCE_PROMPT_MODELS,
-  attemptsPerModel = 2,
+  options: EnhancePromptRetryOptions = {},
 ): Promise<string> {
+  const models = options.models ?? ENHANCE_PROMPT_MODELS;
+  const attemptsPerModel = options.attemptsPerModel ?? 2;
+  const retryDelayMs = options.retryDelayMs ?? 800;
   let lastError: unknown = new Error('Не удалось улучшить промпт.');
 
   for (const model of models) {
@@ -231,9 +242,9 @@ export async function enhancePromptWithRetry(
         return cleaned;
       } catch (error) {
         lastError = error;
-        if (!isRetryable(error)) break; // неисправимая ошибка — пробуем следующую модель
+        if (!isTransientGeminiError(error)) break; // неисправимая ошибка — пробуем следующую модель
         if (attempt < attemptsPerModel - 1) {
-          await sleep(800 * (attempt + 1));
+          await sleep(retryDelayMs * (attempt + 1));
         }
       }
     }
