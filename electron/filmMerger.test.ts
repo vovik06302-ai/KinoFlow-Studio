@@ -41,6 +41,20 @@ test('buildMergeArgs trims the duplicated first frame of every segment except th
   const noTrim = buildMergeArgs({ inputs: ['a.mp4', 'b.mp4'], output: 'o.mp4', trimDuplicateFirstFrame: false });
   assert.ok(!noTrim[noTrim.indexOf('-filter_complex') + 1].includes('trim='));
   assert.throws(() => buildMergeArgs({ inputs: [], output: 'o.mp4' }), /Нет сегментов/);
+
+  const withAudio = buildMergeArgs({
+    inputs: ['a.mp4', 'b.mp4'],
+    output: 'out_audio.mp4',
+    audioPath: 'soundtrack.mp3',
+    audioVolume: 0.75,
+  });
+  assert.ok(withAudio.includes('-stream_loop'));
+  assert.ok(withAudio.includes('soundtrack.mp3'));
+  assert.ok(withAudio.includes('-shortest'));
+  assert.ok(withAudio.includes('aac'));
+  assert.ok(withAudio.includes('[outa]'));
+  const audioFilter = withAudio[withAudio.indexOf('-filter_complex') + 1];
+  assert.match(audioFilter, /\[2:a\]volume=0\.75\[outa\]/);
 });
 
 test('findFfmpeg returns the first candidate that answers -version, otherwise null', async () => {

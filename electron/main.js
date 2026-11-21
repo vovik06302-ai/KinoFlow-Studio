@@ -10,7 +10,14 @@ import {
   performComfyRequest,
   probeLocalComfyUrls,
 } from './comfyBridge.js';
-import { ComfyLauncher, detectComfyDirectory, findLaunchScript } from './comfyLauncher.js';
+import {
+  ComfyLauncher,
+  detectComfyDirectory,
+  ensureWindowsFlushFixInstalled,
+  findLaunchScript,
+  findPortableRoot,
+} from './comfyLauncher.js';
+import { GpuUsageMonitor } from './gpuMonitor.js';
 import {
   archiveVideoClip,
   extractLastFrameWithFfmpeg,
@@ -81,10 +88,20 @@ async function autoStartComfy() {
       if (comfyDir) saveComfyDir(comfyDir);
     }
     if (!comfyDir) return;
+    ensureWindowsFlushFixInstalled(comfyDir);
     const portStates = await Promise.all(
       DEFAULT_COMFY_PROBE_PORTS.map((port) => isPortOpen(port)),
     );
     if (portStates.some(Boolean)) return; // ComfyUI уже работает (Portable 8188 / Desktop 8000 / 8189)
+    if (findPortableRoot(comfyDir)) {
+      comfyLauncher.startInstance({
+        instanceId: '1',
+        comfyDir,
+        gpuIndex: 0,
+        port: 8188,
+      });
+      return;
+    }
     const scriptPath = findLaunchScript(comfyDir);
     if (!scriptPath) return;
     await comfyLauncher.start(scriptPath);
@@ -238,6 +255,9 @@ function registerModelManagerIpc() {
 
   ipcMain.handle('models:scan', async (_event, comfyDir) => {
     saveComfyDir(comfyDir);
+    if (typeof comfyDir === 'string' && comfyDir.trim()) {
+      ensureWindowsFlushFixInstalled(comfyDir);
+    }
     return scanModelsDirectory(comfyDir);
   });
 
@@ -266,7 +286,27 @@ function registerModelManagerIpc() {
 }
 
 let launcherIpcRegistered = false;
-const comfyLauncher = new ComfyLauncher();
+const comfyLauncher = new ComfyLauncher({
+  getLogsDir: () => path.join(app.getPath('userData'), 'logs'),
+});
+const gpuWatchers = new Map();
+
+function hasVisibleGpuWatcher() {
+  if (gpuWatchers.size === 0) return false;
+  return BrowserWindow.getAllWindows().some(
+    (win) =>
+      !win.isDestroyed() &&
+      win.isVisible() &&
+      !win.isMinimized() &&
+      gpuWatchers.has(win.webContents.id),
+  );
+}
+
+const gpuUsageMonitor = new GpuUsageMonitor({
+  intervalMs: 2500,
+  minCacheMs: 1500,
+  shouldPoll: hasVisibleGpuWatcher,
+});
 
 function registerLauncherIpc() {
   if (launcherIpcRegistered) return;
@@ -278,7 +318,50 @@ function registerLauncherIpc() {
     }
   });
 
-  ipcMain.handle('comfy:launcher-state', async () => comfyLauncher.getState());
+  gpuUsageMonitor.subscribe((snapshot) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed() && gpuWatchers.has(win.webContents.id)) {
+        win.webContents.send('comfy:gpu-usage-update', snapshot);
+      }
+    }
+  });
+
+  ipcMain.on('comfy:gpu-watch', (event, active) => {
+    const sender = event.sender;
+    const senderId = sender.id;
+    const current = gpuWatchers.get(senderId) ?? 0;
+
+    if (active) {
+      if (current === 0) {
+        sender.once('destroyed', () => {
+          gpuWatchers.delete(senderId);
+          if (gpuWatchers.size === 0) {
+            gpuUsageMonitor.stop();
+          }
+        });
+      }
+      gpuWatchers.set(senderId, current + 1);
+      gpuUsageMonitor.start();
+    } else if (current > 1) {
+      gpuWatchers.set(senderId, current - 1);
+    } else {
+      gpuWatchers.delete(senderId);
+      if (gpuWatchers.size === 0) {
+        gpuUsageMonitor.stop();
+      }
+    }
+  });
+
+  ipcMain.handle('comfy:gpu-usage', async () => gpuUsageMonitor.pollNow());
+
+  ipcMain.handle('comfy:launcher-state', async (_event, instanceId) => {
+    if (instanceId === 'all') {
+      return comfyLauncher.getAllStates();
+    }
+    return comfyLauncher.getState(typeof instanceId === 'string' && instanceId ? instanceId : '1');
+  });
+
+  ipcMain.handle('comfy:launcher-states', async () => comfyLauncher.getAllStates());
 
   ipcMain.handle('comfy:launcher-detect', async () => {
     const saved = readSavedComfyDir();
@@ -290,17 +373,135 @@ function registerLauncherIpc() {
     return { comfyDir: detected };
   });
 
-  ipcMain.handle('comfy:launcher-start', async (_event, comfyDir) => {
-    saveComfyDir(comfyDir);
-    const scriptPath = findLaunchScript(typeof comfyDir === 'string' ? comfyDir : '');
+  ipcMain.handle('comfy:launcher-start', async (_event, payload) => {
+    if (payload && typeof payload === 'object') {
+      const instanceId =
+        typeof payload.instanceId === 'string' && payload.instanceId.trim()
+          ? payload.instanceId.trim()
+          : '1';
+      const comfyDir = typeof payload.comfyDir === 'string' ? payload.comfyDir.trim() : '';
+      if (comfyDir) {
+        saveComfyDir(comfyDir);
+        ensureWindowsFlushFixInstalled(comfyDir);
+      }
+      return comfyLauncher.startInstance({
+        instanceId,
+        comfyDir,
+        gpuIndex: payload.gpuIndex,
+        port: payload.port,
+      });
+    }
+
+    const comfyDir = typeof payload === 'string' ? payload.trim() : '';
+    if (comfyDir) {
+      saveComfyDir(comfyDir);
+      ensureWindowsFlushFixInstalled(comfyDir);
+    }
+    if (findPortableRoot(comfyDir)) {
+      return comfyLauncher.startInstance({
+        instanceId: '1',
+        comfyDir,
+        gpuIndex: 0,
+        port: 8188,
+      });
+    }
+    const scriptPath = findLaunchScript(comfyDir);
     return comfyLauncher.start(scriptPath);
   });
 
-  ipcMain.handle('comfy:launcher-stop', async () => comfyLauncher.stop());
+  ipcMain.handle('comfy:launcher-install-flush-fix', async (_event, comfyDir) => {
+    const targetDir =
+      (typeof comfyDir === 'string' && comfyDir.trim()) ||
+      readSavedComfyDir() ||
+      detectComfyDirectory() ||
+      '';
+    if (targetDir) saveComfyDir(targetDir);
+    return ensureWindowsFlushFixInstalled(targetDir);
+  });
 
-  // Do not leave an orphaned ComfyUI running when the app is closed after starting it from here.
+  ipcMain.handle('comfy:launcher-restart', async (_event, payload) => {
+    const isObject = Boolean(payload && typeof payload === 'object');
+    const instanceId =
+      isObject && typeof payload.instanceId === 'string' && payload.instanceId.trim()
+        ? payload.instanceId.trim()
+        : '1';
+    const rawComfyDir = isObject ? payload.comfyDir : payload;
+    const targetDir =
+      (typeof rawComfyDir === 'string' && rawComfyDir.trim()) ||
+      readSavedComfyDir() ||
+      detectComfyDirectory() ||
+      '';
+    if (targetDir) saveComfyDir(targetDir);
+    const patchResult = ensureWindowsFlushFixInstalled(targetDir);
+    const prevState = comfyLauncher.getState(instanceId);
+    if (prevState.running) {
+      comfyLauncher.stop(instanceId);
+      await new Promise((resolve) => setTimeout(resolve, 900));
+    }
+
+    if (findPortableRoot(targetDir)) {
+      const gpuIndex =
+        isObject && typeof payload.gpuIndex === 'number' ? payload.gpuIndex : prevState.gpuIndex;
+      const port = isObject && typeof payload.port === 'number' ? payload.port : prevState.port;
+      const started = comfyLauncher.startInstance({
+        instanceId,
+        comfyDir: targetDir,
+        gpuIndex,
+        port,
+      });
+      return {
+        ok: Boolean(started.ok),
+        patched: patchResult.ok,
+        restarted: Boolean(started.ok),
+        patchPath: patchResult.path,
+        scriptPath: started.scriptPath,
+        error: started.error ?? patchResult.error,
+      };
+    }
+
+    const scriptPath = findLaunchScript(targetDir);
+    if (!scriptPath) {
+      return {
+        ok: patchResult.ok,
+        patched: patchResult.ok,
+        restarted: false,
+        patchPath: patchResult.path,
+        error: patchResult.ok
+          ? 'Патч установлен. Перезапустите ComfyUI вручную (скрипт запуска не найден).'
+          : patchResult.error,
+      };
+    }
+    const started = comfyLauncher.start(scriptPath);
+    return {
+      ok: Boolean(started.ok),
+      patched: patchResult.ok,
+      restarted: Boolean(started.ok),
+      patchPath: patchResult.path,
+      scriptPath: started.scriptPath,
+      error: started.error ?? patchResult.error,
+    };
+  });
+
+  ipcMain.handle('comfy:launcher-stop', async (_event, payload) => {
+    if (payload && typeof payload === 'object') {
+      if (payload.all) {
+        const res = comfyLauncher.stopAll();
+        return { ok: true, wasRunning: res.stoppedIds.length > 0, stoppedIds: res.stoppedIds };
+      }
+      const id =
+        typeof payload.instanceId === 'string' && payload.instanceId.trim()
+          ? payload.instanceId.trim()
+          : '1';
+      return comfyLauncher.stop(id);
+    }
+    const id = typeof payload === 'string' && payload.trim() ? payload.trim() : '1';
+    return comfyLauncher.stop(id);
+  });
+
+  // Do not leave orphaned ComfyUI instances or open log descriptors when the app closes.
   app.on('before-quit', () => {
-    comfyLauncher.stop();
+    gpuUsageMonitor.stop();
+    comfyLauncher.stopAll();
   });
 }
 
@@ -312,11 +513,31 @@ function registerFilmIpc() {
 
   ipcMain.handle('film:check-ffmpeg', async () => ({ ffmpegPath: await findFfmpeg() }));
 
+  ipcMain.handle('film:select-audio', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getAllWindows()[0];
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Выберите аудиодорожку для видео (MP3, WAV, M4A, OGG, FLAC)',
+      properties: ['openFile'],
+      filters: [{ name: 'Аудио', extensions: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac'] }],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return null;
+    }
+    const filePath = result.filePaths[0];
+    return { path: filePath, name: path.basename(filePath) };
+  });
+
   ipcMain.handle('film:merge', async (event, payload) => {
     const segmentUrls = Array.isArray(payload?.segmentUrls) ? payload.segmentUrls : [];
     if (segmentUrls.length === 0 || segmentUrls.length > 200 || !segmentUrls.every(isHttpUrl)) {
       return { ok: false, error: 'Некорректный список сегментов для склейки.' };
     }
+    const rawAudioPath = typeof payload?.audioPath === 'string' ? payload.audioPath.trim() : '';
+    const audioPath = rawAudioPath && fs.existsSync(rawAudioPath) ? rawAudioPath : undefined;
+    const audioVolume =
+      typeof payload?.audioVolume === 'number' && Number.isFinite(payload.audioVolume)
+        ? payload.audioVolume
+        : 1.0;
 
     const ffmpegPath = await findFfmpeg();
     if (!ffmpegPath) {
@@ -347,6 +568,8 @@ function registerFilmIpc() {
         segmentUrls,
         outputPath: filePath,
         ffmpegPath,
+        audioPath,
+        audioVolume,
         tempRoot: app.getPath('temp'),
         onProgress: (progress) => {
           if (!win.isDestroyed()) win.webContents.send('film:progress', progress);
@@ -464,7 +687,8 @@ function registerUpdaterIpc() {
         updateManager.install();
       }
       // Stop background tasks and quit cleanly so the NSIS installer can overwrite files.
-      comfyLauncher.stop();
+      gpuUsageMonitor.stop();
+      comfyLauncher.stopAll();
       modelDownloadManager.cancel();
       setTimeout(() => app.quit(), 600);
       return { ok: true };

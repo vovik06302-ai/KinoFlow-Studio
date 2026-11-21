@@ -48,8 +48,14 @@ contextBridge.exposeInMainWorld('kinoflowUpdater', {
 contextBridge.exposeInMainWorld('kinoflowFilm', {
   isElectron: true,
   checkFfmpeg: () => ipcRenderer.invoke('film:check-ffmpeg'),
-  mergeSegments: (segmentUrls, suggestedName) =>
-    ipcRenderer.invoke('film:merge', { segmentUrls, suggestedName }),
+  selectAudio: () => ipcRenderer.invoke('film:select-audio'),
+  mergeSegments: (segmentUrls, suggestedName, audioOptions) =>
+    ipcRenderer.invoke('film:merge', {
+      segmentUrls,
+      suggestedName,
+      audioPath: audioOptions?.audioPath,
+      audioVolume: audioOptions?.audioVolume,
+    }),
   extractLastFrame: (videoUrl) =>
     ipcRenderer.invoke('film:extract-last-frame', { videoUrl }),
   archiveClip: (videoUrl, filename) =>
@@ -68,10 +74,28 @@ contextBridge.exposeInMainWorld('kinoflowFilm', {
 
 contextBridge.exposeInMainWorld('kinoflowLauncher', {
   isElectron: true,
-  getState: () => ipcRenderer.invoke('comfy:launcher-state'),
+  getState: (instanceId) => ipcRenderer.invoke('comfy:launcher-state', instanceId),
+  getAllStates: () => ipcRenderer.invoke('comfy:launcher-states'),
   detectDir: () => ipcRenderer.invoke('comfy:launcher-detect'),
-  start: (comfyDir) => ipcRenderer.invoke('comfy:launcher-start', comfyDir),
-  stop: () => ipcRenderer.invoke('comfy:launcher-stop'),
+  start: (payload) => ipcRenderer.invoke('comfy:launcher-start', payload),
+  stop: (payload) => ipcRenderer.invoke('comfy:launcher-stop', payload),
+  installFlushFix: (comfyDir) => ipcRenderer.invoke('comfy:launcher-install-flush-fix', comfyDir),
+  restart: (payload) => ipcRenderer.invoke('comfy:launcher-restart', payload),
+  getGpuUsage: () => ipcRenderer.invoke('comfy:gpu-usage'),
+  onGpuUsage: (callback) => {
+    let active = true;
+    const listener = (_event, payload) => {
+      callback(payload);
+    };
+    ipcRenderer.on('comfy:gpu-usage-update', listener);
+    ipcRenderer.send('comfy:gpu-watch', true);
+    return () => {
+      if (!active) return;
+      active = false;
+      ipcRenderer.removeListener('comfy:gpu-usage-update', listener);
+      ipcRenderer.send('comfy:gpu-watch', false);
+    };
+  },
   onEvent: (callback) => {
     const listener = (_event, payload) => {
       callback(payload);

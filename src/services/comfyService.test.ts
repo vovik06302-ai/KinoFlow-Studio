@@ -7,6 +7,7 @@ import {
   AUTO_T2V_MODEL_FILE,
   DEFAULT_NEGATIVE_PROMPT,
   GenerationParamsValidationError,
+  LIGHTX2V_LORAS,
   applyLightingToPrompt,
   applyShootingStyleToPrompt,
   buildRootUploadFilename,
@@ -24,6 +25,7 @@ import {
   getViewUrl,
   isHistoryPromptFinished,
   isLoopbackHttpUrl,
+  isWindowsFlushErrno22Error,
   normalizeBaseUrl,
   parseComfyWsEvent,
   planGenerationSegments,
@@ -828,6 +830,125 @@ test('runComfyGeneration blocks non-loopback HTTP on HTTPS pages but allows loop
     }
   }
 });
+
+test('buildWorkflowFromTemplate injects LightX2V LoRA, custom LoRA, fine CFG/Shift/Sampler/Scheduler', () => {
+  const graph = buildWorkflowFromTemplate({
+    settings: {
+      ...baseSettings,
+      modelId: 'auto',
+      fastLightX2V: true,
+      steps: 6,
+      cfg: 1.5,
+      cfgLow: 1.0,
+      flowShift: 6.5,
+      samplerName: 'euler',
+      scheduler: 'beta',
+      customLoraName: 'cinematic_style.safetensors',
+      customLoraStrength: 0.75,
+    },
+    positivePrompt: 'A drone glides over misty fjords.',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    characters: [],
+  });
+
+  // LightX2V LoRA nodes #105 / #106
+  assert.equal(graph['105'].class_type, 'LoraLoaderModelOnly');
+  assert.equal(graph['105'].inputs.lora_name, LIGHTX2V_LORAS.t2vHigh);
+  assert.equal(graph['106'].class_type, 'LoraLoaderModelOnly');
+  assert.equal(graph['106'].inputs.lora_name, LIGHTX2V_LORAS.t2vLow);
+
+  // Custom LoRA chained after LightX2V (#107 / #108)
+  assert.equal(graph['107'].class_type, 'LoraLoaderModelOnly');
+  assert.equal(graph['107'].inputs.lora_name, 'cinematic_style.safetensors');
+  assert.equal(graph['107'].inputs.strength_model, 0.75);
+  assert.deepEqual(graph['107'].inputs.model, ['105', 0]);
+  assert.deepEqual(graph['101'].inputs.model, ['107', 0]);
+  assert.deepEqual(graph['102'].inputs.model, ['108', 0]);
+
+  // Sampler / CFG / Flow Shift overrides
+  assert.equal(graph['101'].inputs.shift, 6.5);
+  assert.equal(graph['102'].inputs.shift, 6.5);
+  assert.equal(graph['40'].inputs.cfg, 1.5);
+  assert.equal(graph['41'].inputs.cfg, 1.0);
+  assert.equal(graph['40'].inputs.sampler_name, 'euler');
+  assert.equal(graph['40'].inputs.scheduler, 'beta');
+  assert.equal(graph['41'].inputs.sampler_name, 'euler');
+  assert.equal(graph['41'].inputs.scheduler, 'beta');
+});
+
+test('buildWorkflowFromTemplate supports I2V center-crop (#70/#71), WanFirstLastFrameToVideo (#8), and color-drift mitigation', () => {
+  const graph = buildWorkflowFromTemplate({
+    settings: {
+      ...baseSettings,
+      modelId: 'auto',
+      mode: 'i2v',
+      width: 832,
+      height: 480,
+      autoCropStartFrame: true,
+      preventColorDrift: true,
+      cfg: 3.5,
+      flowShift: 5.0,
+    },
+    positivePrompt: 'Camera glides smoothly toward the horizon.',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    startFrameFilename: 'start.png',
+    endFrameFilename: 'end.png',
+    characters: [],
+    segmentIndex: 2,
+    isChainedIntermediate: true,
+  });
+
+  // Start & end frame center-crop ImageScale nodes
+  assert.equal(graph['70'].class_type, 'ImageScale');
+  assert.equal(graph['70'].inputs.crop, 'center');
+  assert.equal(graph['70'].inputs.width, 832);
+  assert.equal(graph['70'].inputs.height, 480);
+
+  assert.equal(graph['8'].class_type, 'LoadImage');
+  assert.equal(graph['8'].inputs.image, 'end.png');
+  assert.equal(graph['71'].class_type, 'ImageScale');
+  assert.equal(graph['71'].inputs.crop, 'center');
+
+  // WanFirstLastFrameToVideo node #30
+  assert.equal(graph['30'].class_type, 'WanFirstLastFrameToVideo');
+  assert.deepEqual(graph['30'].inputs.start_image, ['70', 0]);
+  assert.deepEqual(graph['30'].inputs.end_image, ['71', 0]);
+
+  // Color-drift mitigation on segment 2+
+  assert.ok((graph['40'].inputs.cfg as number) < 3.5);
+  assert.ok((graph['101'].inputs.shift as number) < 5.0);
+  assert.match(String(graph['6'].inputs.text), /color drift/);
+  assert.equal(graph['60'].inputs.crf, 14);
+});
+
+test('validateGenerationParams validates CFG, flowShift, sampler, scheduler, customLoraStrength and isWindowsFlushErrno22Error detects logger crashes', () => {
+  const res = validateGenerationParams({
+    settings: {
+      ...baseSettings,
+      cfg: 25,
+      flowShift: 0.2,
+      samplerName: 'bad_sampler' as never,
+      scheduler: 'bad_sched' as never,
+      customLoraStrength: 3.0,
+    },
+  });
+  assert.equal(res.valid, false);
+  const fields = new Set(res.issues.map((i) => i.field));
+  assert.ok(fields.has('cfg'));
+  assert.ok(fields.has('flowShift'));
+  assert.ok(fields.has('samplerName'));
+  assert.ok(fields.has('scheduler'));
+  assert.ok(fields.has('customLoraStrength'));
+
+  assert.equal(
+    isWindowsFlushErrno22Error(
+      'Ошибка ComfyUI · Узел #40 (KSamplerAdvanced): [Errno 22] Invalid argument [app/logger.py:73 in flush]',
+    ),
+    true,
+  );
+  assert.equal(isWindowsFlushErrno22Error('CUDA out of memory'), false);
+});
+
 
 
 

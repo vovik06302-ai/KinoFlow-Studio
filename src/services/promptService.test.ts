@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   composeOfflineCinematicPrompt,
+  containsCyrillic,
   enhancePromptViaLocalLlm,
   enhanceScenePrompt,
   enhanceScenePromptDetailed,
   parseEnhancePromptResponse,
+  translatePromptToEnglishViaLocalLlm,
 } from './promptService';
 import {
   buildEnhancePromptMessages,
@@ -204,3 +206,35 @@ test('formatGeminiEnhanceError turns raw Gemini JSON 503/429/403 errors into cle
   assert.equal(isTransientGeminiError(new Error('503 UNAVAILABLE')), true);
   assert.equal(isTransientGeminiError(new Error('403 PERMISSION_DENIED')), false);
 });
+
+test('containsCyrillic and translatePromptToEnglishViaLocalLlm translate Russian prompts via Ollama/LM Studio', async () => {
+  assert.equal(containsCyrillic('Ночной город в дожде'), true);
+  assert.equal(containsCyrillic('Rainy night city street'), false);
+
+  // Already English -> skips LLM call
+  let called = false;
+  const skipFetch = (async () => {
+    called = true;
+    return new Response('{}', { status: 200 });
+  }) as unknown as typeof fetch;
+  const skipped = await translatePromptToEnglishViaLocalLlm('A cat jumps on a sofa', {
+    url: 'http://127.0.0.1:11434',
+    fetchImpl: skipFetch,
+  });
+  assert.equal(skipped, 'A cat jumps on a sofa');
+  assert.equal(called, false);
+
+  const ollamaFetch = (async () =>
+    new Response(
+      JSON.stringify({ message: { content: 'A rainy neon street at night, slow dolly forward.' } }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )) as unknown as typeof fetch;
+
+  const translated = await translatePromptToEnglishViaLocalLlm('Дождливая неоновая улица ночью', {
+    url: 'http://127.0.0.1:11434',
+    model: 'qwen2.5:7b',
+    fetchImpl: ollamaFetch,
+  });
+  assert.equal(translated, 'A rainy neon street at night, slow dolly forward.');
+});
+

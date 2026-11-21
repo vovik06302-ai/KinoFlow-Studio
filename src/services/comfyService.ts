@@ -17,6 +17,8 @@ import type {
   GenerationSettings,
   ResolutionOption,
   RifeTargetFps,
+  SamplerName,
+  SchedulerName,
   ShootingStyleId,
   ShootingStyleOption,
   StartFrameReference,
@@ -27,6 +29,18 @@ export const SEGMENT_DURATION_SEC = 5;
 export const DURATION_CHOICES: DurationChoice[] = [5, 10, 15, 20, 25, 30];
 export const FPS_CHOICES: FpsChoice[] = [16, 24];
 export const RIFE_FPS_CHOICES: RifeTargetFps[] = [24, 30];
+export const SAMPLER_CHOICES: SamplerName[] = ['uni_pc', 'euler', 'dpmpp_2m', 'res_multistep'];
+export const SCHEDULER_CHOICES: SchedulerName[] = ['simple', 'beta', 'normal', 'sgm_uniform'];
+
+export const LIGHTX2V_LORAS = {
+  t2vHigh: 'wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors',
+  t2vLow: 'wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors',
+  i2vHigh: 'wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors',
+  i2vLow: 'wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors',
+} as const;
+
+export const COLOR_DRIFT_NEGATIVE_GUARD =
+  'color shift, oversaturated contrast, crushed blacks, color drift, exposure jump';
 
 export const GENERATION_PARAM_LIMITS = {
   minSteps: 4,
@@ -39,6 +53,12 @@ export const GENERATION_PARAM_LIMITS = {
   dimensionMultiple: 16,
   minSeed: 0,
   maxSeed: 4_294_967_295,
+  minCfg: 1,
+  maxCfg: 12,
+  minFlowShift: 1,
+  maxFlowShift: 12,
+  minLoraStrength: 0,
+  maxLoraStrength: 1.5,
   maxCharacters: 3,
   minCharacterWeight: 0,
   maxCharacterWeight: 1,
@@ -244,11 +264,15 @@ export interface WorkflowBuildInput {
   negativePrompt: string;
   characters: WorkflowBuildCharacter[];
   startFrameFilename?: string;
+  /** Optional end-frame filename (ComfyUI input/) to activate WanFirstLastFrameToVideo. */
+  endFrameFilename?: string;
   hasStartFrame?: boolean;
   seedOverride?: number;
   filenamePrefix?: string;
   segmentIndex?: number;
   isContinuation?: boolean;
+  /** True when another segment will chain after this one (raises intermediate MP4 quality to minimize chroma drift). */
+  isChainedIntermediate?: boolean;
   videoExportBackend?: VideoExportBackend;
   /** Exact option strings from ComfyUI /object_info when models are located inside subfolders. */
   resolvedModelNames?: Record<string, string>;
@@ -312,6 +336,12 @@ export interface GenerationParamValidationIssue {
     | 'height'
     | 'steps'
     | 'seed'
+    | 'cfg'
+    | 'cfgLow'
+    | 'flowShift'
+    | 'samplerName'
+    | 'scheduler'
+    | 'customLoraStrength'
     | 'rifeEnabled'
     | 'rifeTargetFps'
     | 'positivePrompt'
@@ -513,6 +543,78 @@ export function validateGenerationParams(
     issues.push({
       field: 'seed',
       message: `Seed должен быть целым числом в диапазоне ${GENERATION_PARAM_LIMITS.minSeed}–${GENERATION_PARAM_LIMITS.maxSeed}.`,
+    });
+  }
+
+  if (
+    settings.cfg !== undefined &&
+    (typeof settings.cfg !== 'number' ||
+      !Number.isFinite(settings.cfg) ||
+      settings.cfg < GENERATION_PARAM_LIMITS.minCfg ||
+      settings.cfg > GENERATION_PARAM_LIMITS.maxCfg)
+  ) {
+    issues.push({
+      field: 'cfg',
+      message: `CFG (High-Noise) должен быть числом от ${GENERATION_PARAM_LIMITS.minCfg} до ${GENERATION_PARAM_LIMITS.maxCfg}.`,
+    });
+  }
+
+  if (
+    settings.cfgLow !== undefined &&
+    (typeof settings.cfgLow !== 'number' ||
+      !Number.isFinite(settings.cfgLow) ||
+      settings.cfgLow < GENERATION_PARAM_LIMITS.minCfg ||
+      settings.cfgLow > GENERATION_PARAM_LIMITS.maxCfg)
+  ) {
+    issues.push({
+      field: 'cfgLow',
+      message: `CFG (Low-Noise) должен быть числом от ${GENERATION_PARAM_LIMITS.minCfg} до ${GENERATION_PARAM_LIMITS.maxCfg}.`,
+    });
+  }
+
+  if (
+    settings.flowShift !== undefined &&
+    (typeof settings.flowShift !== 'number' ||
+      !Number.isFinite(settings.flowShift) ||
+      settings.flowShift < GENERATION_PARAM_LIMITS.minFlowShift ||
+      settings.flowShift > GENERATION_PARAM_LIMITS.maxFlowShift)
+  ) {
+    issues.push({
+      field: 'flowShift',
+      message: `Flow Shift должен быть числом от ${GENERATION_PARAM_LIMITS.minFlowShift} до ${GENERATION_PARAM_LIMITS.maxFlowShift}.`,
+    });
+  }
+
+  if (
+    settings.samplerName !== undefined &&
+    !SAMPLER_CHOICES.includes(settings.samplerName)
+  ) {
+    issues.push({
+      field: 'samplerName',
+      message: `Сэмплер должен быть одним из значений: ${SAMPLER_CHOICES.join(', ')}.`,
+    });
+  }
+
+  if (
+    settings.scheduler !== undefined &&
+    !SCHEDULER_CHOICES.includes(settings.scheduler)
+  ) {
+    issues.push({
+      field: 'scheduler',
+      message: `Планировщик шума должен быть одним из значений: ${SCHEDULER_CHOICES.join(', ')}.`,
+    });
+  }
+
+  if (
+    settings.customLoraStrength !== undefined &&
+    (typeof settings.customLoraStrength !== 'number' ||
+      !Number.isFinite(settings.customLoraStrength) ||
+      settings.customLoraStrength < GENERATION_PARAM_LIMITS.minLoraStrength ||
+      settings.customLoraStrength > GENERATION_PARAM_LIMITS.maxLoraStrength)
+  ) {
+    issues.push({
+      field: 'customLoraStrength',
+      message: `Сила LoRA должна быть числом от ${GENERATION_PARAM_LIMITS.minLoraStrength} до ${GENERATION_PARAM_LIMITS.maxLoraStrength}.`,
     });
   }
 
@@ -798,8 +900,13 @@ export function buildWorkflowFromTemplate(
   const model = getModelOption(input.settings.modelId);
   const steps = Math.max(4, Math.min(100, Math.round(input.settings.steps)));
   const seed = Math.max(0, Math.floor(input.seedOverride ?? input.settings.seed));
-  const splitStep = Math.max(1, Math.min(steps - 1, Math.round(steps * 0.36)));
+  const useLightX2V = Boolean(input.settings.fastLightX2V && model.architecture === 'wan22-moe');
+  const splitStep = useLightX2V
+    ? Math.max(1, Math.min(steps - 1, Math.floor(steps / 2)))
+    : Math.max(1, Math.min(steps - 1, Math.round(steps * 0.36)));
   const segmentFrames = secondsToAlignedFrames(SEGMENT_DURATION_SEC, input.settings.fps);
+  const isChainedSegment = segmentIndex >= 2 || isContinuation;
+  const mitigateColorDrift = Boolean(input.settings.preventColorDrift && isChainedSegment);
 
   const resolveOption = (classType: string, field: string, fileName: string): string => {
     const map = input.resolvedModelNames;
@@ -847,37 +954,181 @@ export function buildWorkflowFromTemplate(
     graph['5'].inputs.text = input.positivePrompt.trim();
   }
   if (graph['6']) {
-    graph['6'].inputs.text = input.negativePrompt.trim();
+    const baseNeg = input.negativePrompt.trim();
+    if (mitigateColorDrift && !baseNeg.toLowerCase().includes('color drift')) {
+      graph['6'].inputs.text = baseNeg
+        ? `${baseNeg}, ${COLOR_DRIFT_NEGATIVE_GUARD}`
+        : COLOR_DRIFT_NEGATIVE_GUARD;
+    } else {
+      graph['6'].inputs.text = baseNeg;
+    }
   }
 
-  if (mode === 'i2v' && graph['7']) {
-    graph['7'].inputs.image = input.startFrameFilename || '{{START_FRAME_IMAGE}}';
-  }
+  // Optional LoRA chain between UNET loader(s) (#1/#2) and ModelSamplingSD3 (#101/#102):
+  // 1) LightX2V 4-step distill LoRA (#105 High-Noise, #106 Low-Noise)
+  // 2) User custom LoRA (#107 High-Noise, #108 Low-Noise)
+  let highModelLink: [string, number] = ['1', 0];
+  let lowModelLink: [string, number] = ['2', 0];
 
-  // Ensure ModelSamplingSD3 (shift=5.0) sits between UNET loader(s) and KSamplerAdvanced for Wan 2.2.
-  if (!graph['101']) {
-    graph['101'] = {
-      class_type: 'ModelSamplingSD3',
+  if (useLightX2V) {
+    const highLoraFile = mode === 'i2v' ? LIGHTX2V_LORAS.i2vHigh : LIGHTX2V_LORAS.t2vHigh;
+    const lowLoraFile = mode === 'i2v' ? LIGHTX2V_LORAS.i2vLow : LIGHTX2V_LORAS.t2vLow;
+    graph['105'] = {
+      class_type: 'LoraLoaderModelOnly',
       inputs: {
-        model: ['1', 0],
-        shift: 5.0,
+        model: highModelLink,
+        lora_name: resolveOption('LoraLoaderModelOnly', 'lora_name', highLoraFile),
+        strength_model: 1.0,
       },
       _meta: {
-        title: 'Wan 2.2 Flow Shift (High-Noise, shift=5.0)',
+        title: 'LightX2V 4-Step LoRA (High-Noise)',
       },
     };
+    highModelLink = ['105', 0];
+
+    graph['106'] = {
+      class_type: 'LoraLoaderModelOnly',
+      inputs: {
+        model: lowModelLink,
+        lora_name: resolveOption('LoraLoaderModelOnly', 'lora_name', lowLoraFile),
+        strength_model: 1.0,
+      },
+      _meta: {
+        title: 'LightX2V 4-Step LoRA (Low-Noise)',
+      },
+    };
+    lowModelLink = ['106', 0];
   }
-  if (model.architecture === 'wan22-moe' && !graph['102']) {
+
+  const customLoraName = (input.settings.customLoraName ?? '').trim();
+  if (customLoraName) {
+    const customStrength = Number(
+      Math.max(
+        GENERATION_PARAM_LIMITS.minLoraStrength,
+        Math.min(GENERATION_PARAM_LIMITS.maxLoraStrength, input.settings.customLoraStrength ?? 0.8),
+      ).toFixed(2),
+    );
+    const resolvedCustomLora = resolveOption('LoraLoaderModelOnly', 'lora_name', customLoraName);
+    graph['107'] = {
+      class_type: 'LoraLoaderModelOnly',
+      inputs: {
+        model: highModelLink,
+        lora_name: resolvedCustomLora,
+        strength_model: customStrength,
+      },
+      _meta: {
+        title: `Custom LoRA (High-Noise, ${customStrength})`,
+      },
+    };
+    highModelLink = ['107', 0];
+
+    if (model.architecture === 'wan22-moe') {
+      graph['108'] = {
+        class_type: 'LoraLoaderModelOnly',
+        inputs: {
+          model: lowModelLink,
+          lora_name: resolvedCustomLora,
+          strength_model: customStrength,
+        },
+        _meta: {
+          title: `Custom LoRA (Low-Noise, ${customStrength})`,
+        },
+      };
+      lowModelLink = ['108', 0];
+    }
+  }
+
+  const baseFlowShift =
+    typeof input.settings.flowShift === 'number' && Number.isFinite(input.settings.flowShift)
+      ? input.settings.flowShift
+      : 5.0;
+  const effectiveFlowShift = Number(
+    Math.max(
+      GENERATION_PARAM_LIMITS.minFlowShift,
+      Math.min(
+        GENERATION_PARAM_LIMITS.maxFlowShift,
+        mitigateColorDrift ? baseFlowShift - 0.3 : baseFlowShift,
+      ),
+    ).toFixed(2),
+  );
+
+  // Ensure ModelSamplingSD3 sits between UNET/LoRA chain and KSamplerAdvanced for Wan 2.2.
+  graph['101'] = {
+    class_type: 'ModelSamplingSD3',
+    inputs: {
+      model: highModelLink,
+      shift: effectiveFlowShift,
+    },
+    _meta: {
+      title: `Wan 2.2 Flow Shift (High-Noise, shift=${effectiveFlowShift})`,
+    },
+  };
+  if (model.architecture === 'wan22-moe') {
     graph['102'] = {
       class_type: 'ModelSamplingSD3',
       inputs: {
-        model: ['2', 0],
-        shift: 5.0,
+        model: lowModelLink,
+        shift: effectiveFlowShift,
       },
       _meta: {
-        title: 'Wan 2.2 Flow Shift (Low-Noise, shift=5.0)',
+        title: `Wan 2.2 Flow Shift (Low-Noise, shift=${effectiveFlowShift})`,
       },
     };
+  }
+
+  // I2V Start Frame (#7) + optional center-crop ImageScale (#70) + optional End Frame (#8/#71)
+  let startImageLink: [string, number] = ['7', 0];
+  let endImageLink: [string, number] | null = null;
+
+  if (mode === 'i2v' && graph['7']) {
+    graph['7'].inputs.image = input.startFrameFilename || '{{START_FRAME_IMAGE}}';
+
+    if (input.settings.autoCropStartFrame === true) {
+      graph['70'] = {
+        class_type: 'ImageScale',
+        inputs: {
+          image: ['7', 0],
+          upscale_method: 'lanczos',
+          width: input.settings.width,
+          height: input.settings.height,
+          crop: 'center',
+        },
+        _meta: {
+          title: 'I2V Start Frame Aspect-Ratio Fit (Center Crop)',
+        },
+      };
+      startImageLink = ['70', 0];
+    }
+
+    if (input.endFrameFilename && model.architecture === 'wan22-moe') {
+      graph['8'] = {
+        class_type: 'LoadImage',
+        inputs: {
+          image: input.endFrameFilename,
+        },
+        _meta: {
+          title: 'End Frame Image (First+Last Frame Anchor)',
+        },
+      };
+      if (input.settings.autoCropStartFrame === true) {
+        graph['71'] = {
+          class_type: 'ImageScale',
+          inputs: {
+            image: ['8', 0],
+            upscale_method: 'lanczos',
+            width: input.settings.width,
+            height: input.settings.height,
+            crop: 'center',
+          },
+          _meta: {
+            title: 'I2V End Frame Aspect-Ratio Fit (Center Crop)',
+          },
+        };
+        endImageLink = ['71', 0];
+      } else {
+        endImageLink = ['8', 0];
+      }
+    }
   }
 
   // Wan 2.2 TI2V-5B (wan22-dense) uses 48-channel wan2.2_vae and requires Wan22ImageToVideoLatent
@@ -891,7 +1142,7 @@ export function buildWorkflowFromTemplate(
       batch_size: 1,
     };
     if (mode === 'i2v' && graph['7']) {
-      latentInputs.start_image = ['7', 0];
+      latentInputs.start_image = startImageLink;
     }
     graph['30'] = {
       class_type: 'Wan22ImageToVideoLatent',
@@ -909,12 +1160,77 @@ export function buildWorkflowFromTemplate(
     graph['30'].inputs.width = input.settings.width;
     graph['30'].inputs.height = input.settings.height;
     graph['30'].inputs.length = segmentFrames;
+    if (mode === 'i2v') {
+      graph['30'].inputs.start_image = startImageLink;
+      if (endImageLink) {
+        graph['30'].class_type = 'WanFirstLastFrameToVideo';
+        graph['30'].inputs.end_image = endImageLink;
+        graph['30']._meta = {
+          title: 'First + Last Frame Video Conditioning (Wan 2.2)',
+        };
+      }
+    }
   }
+
+  const templateCfgHigh =
+    typeof graph['40']?.inputs?.cfg === 'number'
+      ? (graph['40'].inputs.cfg as number)
+      : mode === 'i2v'
+        ? 4.0
+        : 4.5;
+  const templateCfgLow =
+    typeof graph['41']?.inputs?.cfg === 'number' ? (graph['41'].inputs.cfg as number) : 3.5;
+
+  const rawCfgHigh = useLightX2V
+    ? typeof input.settings.cfg === 'number'
+      ? Math.min(2.0, input.settings.cfg)
+      : 1.0
+    : typeof input.settings.cfg === 'number'
+      ? input.settings.cfg
+      : templateCfgHigh;
+  const rawCfgLow = useLightX2V
+    ? typeof input.settings.cfgLow === 'number'
+      ? Math.min(2.0, input.settings.cfgLow)
+      : 1.0
+    : typeof input.settings.cfgLow === 'number'
+      ? input.settings.cfgLow
+      : templateCfgLow;
+
+  const effectiveCfgHigh = Number(
+    Math.max(
+      GENERATION_PARAM_LIMITS.minCfg,
+      Math.min(
+        GENERATION_PARAM_LIMITS.maxCfg,
+        mitigateColorDrift && !useLightX2V ? rawCfgHigh - 0.35 : rawCfgHigh,
+      ),
+    ).toFixed(2),
+  );
+  const effectiveCfgLow = Number(
+    Math.max(
+      GENERATION_PARAM_LIMITS.minCfg,
+      Math.min(
+        GENERATION_PARAM_LIMITS.maxCfg,
+        mitigateColorDrift && !useLightX2V ? rawCfgLow - 0.35 : rawCfgLow,
+      ),
+    ).toFixed(2),
+  );
+
+  const effectiveSampler: SamplerName =
+    input.settings.samplerName && SAMPLER_CHOICES.includes(input.settings.samplerName)
+      ? input.settings.samplerName
+      : 'uni_pc';
+  const effectiveScheduler: SchedulerName =
+    input.settings.scheduler && SCHEDULER_CHOICES.includes(input.settings.scheduler)
+      ? input.settings.scheduler
+      : 'simple';
 
   if (graph['40']) {
     graph['40'].inputs.model = ['101', 0];
     graph['40'].inputs.noise_seed = seed;
     graph['40'].inputs.steps = steps;
+    graph['40'].inputs.cfg = effectiveCfgHigh;
+    graph['40'].inputs.sampler_name = effectiveSampler;
+    graph['40'].inputs.scheduler = effectiveScheduler;
     graph['40'].inputs.end_at_step = model.architecture === 'wan22-moe' ? splitStep : steps;
     graph['40'].inputs.return_with_leftover_noise =
       model.architecture === 'wan22-moe' ? 'enable' : 'disable';
@@ -925,6 +1241,9 @@ export function buildWorkflowFromTemplate(
       graph['41'].inputs.model = ['102', 0];
       graph['41'].inputs.noise_seed = seed;
       graph['41'].inputs.steps = steps;
+      graph['41'].inputs.cfg = effectiveCfgLow;
+      graph['41'].inputs.sampler_name = effectiveSampler;
+      graph['41'].inputs.scheduler = effectiveScheduler;
       graph['41'].inputs.start_at_step = splitStep;
     }
     if (graph['50']) {
@@ -933,6 +1252,8 @@ export function buildWorkflowFromTemplate(
   } else {
     delete graph['2'];
     delete graph['102'];
+    delete graph['106'];
+    delete graph['108'];
     delete graph['41'];
     if (graph['50']) {
       graph['50'].inputs.samples = ['40', 0];
@@ -1011,6 +1332,9 @@ export function buildWorkflowFromTemplate(
   } else if (graph['60']) {
     graph['60'].inputs.images = currentImageLink;
     graph['60'].inputs.frame_rate = outputFps;
+    if (input.isChainedIntermediate && input.settings.preventColorDrift) {
+      graph['60'].inputs.crf = 14;
+    }
     if (input.filenamePrefix) {
       graph['60'].inputs.filename_prefix = input.filenamePrefix;
     }
@@ -1219,9 +1543,10 @@ export function classifyConnectionError(params: {
 export function buildPreflightGraphs(params: {
   settings: GenerationSettings;
   hasStartFrame: boolean;
+  hasEndFrame?: boolean;
   isContinuation: boolean;
 }): ComfyWorkflowGraph[] {
-  const { settings, hasStartFrame, isContinuation } = params;
+  const { settings, hasStartFrame, hasEndFrame = false, isContinuation } = params;
   const planned = planGenerationSegments(settings.durationSec, settings.mode);
   const graphs = new Map<string, ComfyWorkflowGraph>();
 
@@ -1233,9 +1558,12 @@ export function buildPreflightGraphs(params: {
       hasStartFrame: segment.index === 1 ? hasStartFrame : true,
       isContinuation,
     });
-    if (graphs.has(route.workflowMode)) continue;
+    const isFinalSegment = segment.index === planned.length;
+    const usesEndFrame = Boolean(hasEndFrame && route.workflowMode === 'i2v' && isFinalSegment);
+    const key = `${route.workflowMode}:${usesEndFrame ? 'flf' : 'std'}`;
+    if (graphs.has(key)) continue;
     graphs.set(
-      route.workflowMode,
+      key,
       buildWorkflowFromTemplate({
         settings,
         modeOverride: route.workflowMode,
@@ -1243,6 +1571,7 @@ export function buildPreflightGraphs(params: {
         negativePrompt: '',
         characters: [],
         startFrameFilename: route.workflowMode === 'i2v' ? 'preflight.png' : undefined,
+        endFrameFilename: usesEndFrame ? 'preflight_end.png' : undefined,
         hasStartFrame: route.workflowMode === 'i2v',
         segmentIndex: segment.index,
         isContinuation,
@@ -1260,9 +1589,11 @@ export function buildPreflightGraphs(params: {
 export async function checkConnection(
   serverUrl: string,
   timeoutMs: number = 4500,
+  options?: { allowAutoProbe?: boolean },
 ): Promise<ConnectionInfo> {
   const base = normalizeBaseUrl(serverUrl);
   const electronBridge = getElectronComfyBridge();
+  const allowAutoProbe = options?.allowAutoProbe !== false;
 
   if (electronBridge) {
     const res = await electronBridge.request({
@@ -1297,6 +1628,7 @@ export async function checkConnection(
 
     // If port is closed on loopback, automatically check other standard ComfyUI ports (8188 / 8000 / 8189)
     if (
+      allowAutoProbe &&
       (res.errorCode === 'ECONNREFUSED' || res.errorCode === 'NETWORK_ERROR') &&
       /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(base)
     ) {
@@ -1721,12 +2053,21 @@ export function formatComfyExecutionError(params: {
   if (/errno\s*22|invalid argument/i.test(exc)) {
     const isConsoleStreamCrash = /tqdm|flush|stdout|stderr|logger|prestartup_script/i.test(tracebackText);
     if (isConsoleStreamCrash) {
-      return `${baseMessage}. Сбой консольного вывода прогресса в Windows — перезапустите ComfyUI из KinoFlow Studio или обновите ComfyUI и ComfyUI-Manager.`;
+      return `${baseMessage}. Сбой консольного вывода прогресса в Windows (app/logger.py) — нажмите «Исправить [Errno 22] и перезапустить ComfyUI» ниже, чтобы установить встроенный патч custom_nodes/kinoflow_win_flush_fix и перезапустить ComfyUI.`;
     }
-    return `${baseMessage}. Возможные причины на Windows: сбой консольного прогресс-бара (перезапустите ComfyUI из KinoFlow Studio или обновите ComfyUI/Manager), расположение ComfyUI в OneDrive либо повреждённый файл модели.`;
+    return `${baseMessage}. Возможные причины на Windows: сбой консольного вывода (установите патч [Errno 22] и перезапустите ComfyUI из KinoFlow Studio), расположение ComfyUI в OneDrive либо повреждённый файл модели.`;
   }
 
   return baseMessage;
+}
+
+/**
+ * Returns true when an error message represents the Windows ComfyUI console/pipe
+ * `OSError: [Errno 22] Invalid argument` crash in `app/logger.py:flush()`.
+ */
+export function isWindowsFlushErrno22Error(message: string | null | undefined): boolean {
+  if (!message) return false;
+  return /errno\s*22|invalid argument/i.test(message) && /logger\.py|flush|консольн|KSampler/i.test(message);
 }
 
 /**
@@ -2111,6 +2452,8 @@ export interface RunGenerationOptions {
   /** Camera move applied to segments whose shot has no own camera (or when there is no storyboard). */
   defaultCamera?: CameraPresetId;
   startFrame?: StartFrameReference | null;
+  /** Optional target end frame for I2V First+Last Frame interpolation (WanFirstLastFrameToVideo). */
+  endFrame?: StartFrameReference | null;
   isContinuation?: boolean;
   fallbackCharacterAnchors?: WorkflowBuildCharacter[];
   signal: AbortSignal;
@@ -2128,7 +2471,8 @@ export interface RunGenerationResult {
 
 /**
  * End-to-end Chained Generation pipeline (5s – 30s + unlimited Extend Scene):
- * 1. Uploads the character portrait anchor (if used as start frame) or explicit Start Frame via /upload/image.
+ * 1. Uploads the character portrait anchor (if used as start frame), explicit Start Frame,
+ *    and optional End Frame via /upload/image.
  * 2. Runs Segment 1 (0-5s) in the selected mode (T2V via workflow_t2v.json or I2V via workflow_i2v.json).
  * 3. For 10s – 30s durations (and Extend Scene continuations), extracts the last frame of each rendered
  *    segment (via native FFmpeg in Electron or HTML5 <canvas>), uploads it, and chains into I2V.
@@ -2144,6 +2488,7 @@ export async function runComfyGeneration(
     storyboard,
     defaultCamera = 'none',
     startFrame,
+    endFrame,
     isContinuation = false,
     fallbackCharacterAnchors = [],
     signal,
@@ -2188,6 +2533,7 @@ export async function runComfyGeneration(
     buildPreflightGraphs({
       settings,
       hasStartFrame: Boolean(startFrame) || (characters.length > 0 && !isContinuation),
+      hasEndFrame: Boolean(endFrame && settings.mode === 'i2v'),
       isContinuation,
     }),
     createComfyFetch(),
@@ -2202,6 +2548,7 @@ export async function runComfyGeneration(
 
   const uploadedChars: WorkflowBuildCharacter[] = [];
   let currentStartFrameFilename: string | undefined;
+  let uploadedEndFrameFilename: string | undefined;
 
   // Wan 2.2 uses the character portrait as the I2V start frame when no explicit start frame is set.
   // Only upload the primary character photo when it is actually referenced by the workflow.
@@ -2238,7 +2585,7 @@ export async function runComfyGeneration(
     }
     onProgress({
       phase: 'uploading',
-      percent: 8,
+      percent: 7,
       segmentIndex: 1,
       totalSegments: plannedSegments.length,
       segmentStartSec: 0,
@@ -2249,6 +2596,25 @@ export async function runComfyGeneration(
     });
     const uploadedStart = await uploadImage(serverUrl, startFrame.file, 'kinoflow_start');
     currentStartFrameFilename = uploadedStart.name;
+  }
+
+  if (settings.mode === 'i2v' && endFrame) {
+    if (signal.aborted) {
+      throw new Error('Генерация отменена пользователем.');
+    }
+    onProgress({
+      phase: 'uploading',
+      percent: 9,
+      segmentIndex: 1,
+      totalSegments: plannedSegments.length,
+      segmentStartSec: 0,
+      segmentEndSec: SEGMENT_DURATION_SEC,
+      segmentMode: 'i2v',
+      identityAnchorCount: uploadedChars.length,
+      message: `Загрузка конечного кадра: ${endFrame.file.name}`,
+    });
+    const uploadedEnd = await uploadImage(serverUrl, endFrame.file, 'kinoflow_end');
+    uploadedEndFrameFilename = uploadedEnd.name;
   }
 
   const renderedSegments: GeneratedSegment[] = [];
@@ -2278,6 +2644,7 @@ export async function runComfyGeneration(
       isContinuation,
     });
 
+    const isFinalSegment = segment.index === segment.total;
     const workflow = buildWorkflowFromTemplate({
       settings,
       modeOverride: route.workflowMode,
@@ -2289,11 +2656,14 @@ export async function runComfyGeneration(
       negativePrompt,
       characters: uploadedChars,
       startFrameFilename: route.workflowMode === 'i2v' ? currentStartFrameFilename : undefined,
+      endFrameFilename:
+        route.workflowMode === 'i2v' && isFinalSegment ? uploadedEndFrameFilename : undefined,
       hasStartFrame: route.workflowMode === 'i2v' && Boolean(currentStartFrameFilename),
       seedOverride: segmentSeed,
       filenamePrefix: `kinoflow_seg${segment.index}_${route.workflowMode}`,
       segmentIndex: segment.index,
       isContinuation,
+      isChainedIntermediate: !isFinalSegment,
       videoExportBackend,
       resolvedModelNames,
       coreVideoFormat,

@@ -117,6 +117,58 @@ export const REQUIRED_MODELS = [
     expectedSizeBytes: 66961958,
     optional: true,
   },
+  {
+    id: 'wan22-t2v-lightx2v-high',
+    name: 'LightX2V 4-step LoRA · T2V High-Noise',
+    category: 'LoRA · Турбо ×3 (Доп.)',
+    description: 'Ускоряет генерацию Wan 2.2 T2V в 3–4× раза (4–8 шагов вместо 28) для High-Noise эксперта.',
+    filename: 'wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors',
+    targetSubfolder: 'models/loras',
+    repoId: 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+    downloadUrl:
+      'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors',
+    expectedSizeBytes: 1226977424,
+    optional: true,
+  },
+  {
+    id: 'wan22-t2v-lightx2v-low',
+    name: 'LightX2V 4-step LoRA · T2V Low-Noise',
+    category: 'LoRA · Турбо ×3 (Доп.)',
+    description: 'Вторая половинка ускоряющей LoRA для Low-Noise эксперта Wan 2.2 T2V (4–8 шагов).',
+    filename: 'wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors',
+    targetSubfolder: 'models/loras',
+    repoId: 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+    downloadUrl:
+      'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors',
+    expectedSizeBytes: 1226977424,
+    optional: true,
+  },
+  {
+    id: 'wan22-i2v-lightx2v-high',
+    name: 'LightX2V 4-step LoRA · I2V High-Noise',
+    category: 'LoRA · Турбо ×3 (Доп.)',
+    description: 'Ускоряет «Оживление фото» и цепочки 10–30 сек в 3–4× раза (High-Noise эксперт I2V).',
+    filename: 'wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors',
+    targetSubfolder: 'models/loras',
+    repoId: 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+    downloadUrl:
+      'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors',
+    expectedSizeBytes: 1226977424,
+    optional: true,
+  },
+  {
+    id: 'wan22-i2v-lightx2v-low',
+    name: 'LightX2V 4-step LoRA · I2V Low-Noise',
+    category: 'LoRA · Турбо ×3 (Доп.)',
+    description: 'Вторая половинка ускоряющей LoRA для Low-Noise эксперта Wan 2.2 I2V (4–8 шагов).',
+    filename: 'wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors',
+    targetSubfolder: 'models/loras',
+    repoId: 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+    downloadUrl:
+      'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors',
+    expectedSizeBytes: 1226977424,
+    optional: true,
+  },
 ];
 
 /**

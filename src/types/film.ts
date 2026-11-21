@@ -11,10 +11,20 @@ export interface FilmMergeProgress {
   total: number;
 }
 
+export interface SelectedAudioTrack {
+  path: string;
+  name: string;
+}
+
 export interface ElectronFilmBridge {
   isElectron: boolean;
   checkFfmpeg: () => Promise<{ ffmpegPath: string | null }>;
-  mergeSegments: (segmentUrls: string[], suggestedName: string) => Promise<FilmMergeResult>;
+  selectAudio?: () => Promise<SelectedAudioTrack | null>;
+  mergeSegments: (
+    segmentUrls: string[],
+    suggestedName: string,
+    audioOptions?: { audioPath?: string; audioVolume?: number },
+  ) => Promise<FilmMergeResult>;
   extractLastFrame?: (videoUrl: string) => Promise<{
     ok: boolean;
     pngBase64?: string;

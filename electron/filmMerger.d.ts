@@ -16,12 +16,16 @@ export declare function buildMergeArgs(options: {
   output: string;
   trimDuplicateFirstFrame?: boolean;
   crf?: number;
+  audioPath?: string;
+  audioVolume?: number;
 }): string[];
 export declare function isHttpUrl(value: unknown): boolean;
 export declare function mergeSegments(options: {
   segmentUrls: string[];
   outputPath: string;
   ffmpegPath: string | null;
+  audioPath?: string;
+  audioVolume?: number;
   tempRoot?: string;
   spawnImpl?: unknown;
   downloadImpl?: (options: { url: string; destPath: string }) => Promise<unknown>;

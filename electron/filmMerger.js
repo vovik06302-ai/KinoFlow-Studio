@@ -51,27 +51,57 @@ export async function findFfmpeg({ candidates = ffmpegCandidates(), spawnImpl = 
   return null;
 }
 
-export function buildMergeArgs({ inputs, output, trimDuplicateFirstFrame = true, crf = 17 }) {
+export function buildMergeArgs({
+  inputs,
+  output,
+  trimDuplicateFirstFrame = true,
+  crf = 17,
+  audioPath,
+  audioVolume = 1.0,
+}) {
   if (!Array.isArray(inputs) || inputs.length === 0) {
     throw new Error('Нет сегментов для склейки.');
   }
+  const hasAudio = typeof audioPath === 'string' && audioPath.trim().length > 0;
   const args = ['-y', '-hide_banner', '-loglevel', 'error'];
   for (const input of inputs) {
     args.push('-i', input);
   }
+  if (hasAudio) {
+    args.push('-stream_loop', '-1', '-i', audioPath.trim());
+  }
+
   const chains = inputs.map((_, index) =>
     index > 0 && trimDuplicateFirstFrame
       ? `[${index}:v]trim=start_frame=1,setpts=PTS-STARTPTS[v${index}]`
       : `[${index}:v]setpts=PTS-STARTPTS[v${index}]`,
   );
   const labels = inputs.map((_, index) => `[v${index}]`).join('');
-  const filter = `${chains.join(';')};${labels}concat=n=${inputs.length}:v=1:a=0[outv]`;
+  let filter = `${chains.join(';')};${labels}concat=n=${inputs.length}:v=1:a=0[outv]`;
+
+  const audioInputIndex = inputs.length;
+  const clampedVol = Number.isFinite(audioVolume) ? Math.max(0, Math.min(2, audioVolume)) : 1.0;
+  if (hasAudio && clampedVol !== 1.0) {
+    filter += `;[${audioInputIndex}:a]volume=${clampedVol.toFixed(2)}[outa]`;
+  }
+
+  args.push('-filter_complex', filter, '-map', '[outv]');
+
+  if (hasAudio) {
+    args.push(
+      '-map',
+      clampedVol !== 1.0 ? '[outa]' : `${audioInputIndex}:a`,
+      '-c:a',
+      'aac',
+      '-b:a',
+      '192k',
+      '-shortest',
+    );
+  } else {
+    args.push('-an');
+  }
+
   args.push(
-    '-filter_complex',
-    filter,
-    '-map',
-    '[outv]',
-    '-an',
     '-c:v',
     'libx264',
     '-preset',
@@ -100,6 +130,8 @@ export async function mergeSegments({
   segmentUrls,
   outputPath,
   ffmpegPath,
+  audioPath,
+  audioVolume = 1.0,
   tempRoot = os.tmpdir(),
   spawnImpl = spawn,
   downloadImpl = downloadToFile,
@@ -125,7 +157,7 @@ export async function mergeSegments({
     }
 
     onProgress?.({ phase: 'encoding', index: segmentUrls.length, total: segmentUrls.length });
-    const args = buildMergeArgs({ inputs, output: outputPath });
+    const args = buildMergeArgs({ inputs, output: outputPath, audioPath, audioVolume });
     const { code, stderr } = await runProcess(ffmpegPath, args, spawnImpl);
     if (code !== 0) {
       throw new Error(`FFmpeg завершился с кодом ${code}. ${stderr.trim().split('\n').slice(-3).join(' ')}`);

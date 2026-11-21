@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Image as ImageIcon, Play, Square, Type as TypeIcon } from 'lucide-react';
+import { Image as ImageIcon, ListPlus, Play, Square, Type as TypeIcon } from 'lucide-react';
+import { BatchQueuePanel } from './components/BatchQueuePanel';
 import { CharacterReferencesPanel } from './components/CharacterReferencesPanel';
 import { CorsGuideView } from './components/CorsGuideView';
 import { ModelsSetupView } from './components/ModelsSetupView';
@@ -13,10 +14,23 @@ import { StoryboardPanel } from './components/StoryboardPanel';
 import { UpdateControl } from './components/UpdateControl';
 import { WorkflowInspectorView } from './components/WorkflowInspectorView';
 import {
+  clearFinishedBatchItems,
+  createBatchQueueItem,
+  enqueueBatchItem,
+  getNextPendingBatchItem,
+  loadBatchQueue,
+  removeBatchItem,
+  saveBatchQueue,
+  updateBatchItem,
+} from './services/batchQueue';
+import type { BatchQueueItem } from './services/batchQueue';
+import {
   DEFAULT_NEGATIVE_PROMPT,
   DURATION_CHOICES,
   FPS_CHOICES,
   RIFE_FPS_CHOICES,
+  SAMPLER_CHOICES,
+  SCHEDULER_CHOICES,
   SEGMENT_DURATION_SEC,
   SHOOTING_STYLES,
   VIDEO_MODELS,
@@ -34,21 +48,27 @@ import {
   secondsToAlignedFrames,
 } from './services/comfyService';
 import {
+  DEFAULT_COMFY_INSTANCES_SETTINGS,
   HISTORY_AUTOSAVE_INTERVAL_MS,
   loadHistory,
   loadSavedSettings,
+  normalizeComfyInstancesSettings,
   saveHistory,
   saveSettings,
   startHistoryAutoSave,
 } from './services/historyStorage';
 import { DEFAULT_COMFY_DIR } from './services/modelManagerService';
-import { PreflightError } from './services/preflightService';
+import { PreflightError, fetchAvailableLoras } from './services/preflightService';
 import { exportScenePreset } from './services/scenePreset';
 import type { ScenePreset } from './services/scenePreset';
 import { countStoryboardSegments, getCameraPreset, resizeStoryboard } from './services/storyboard';
 import type { CameraPresetId, StoryboardShot } from './services/storyboard';
 import type { PreflightReport } from './services/preflightService';
-import { enhanceScenePromptDetailed } from './services/promptService';
+import {
+  containsCyrillic,
+  enhanceScenePromptDetailed,
+  translatePromptToEnglishViaLocalLlm,
+} from './services/promptService';
 import { extractLastFrameFromVideo } from './utils/videoFrameUtils';
 import type {
   BaseModelId,
@@ -62,6 +82,8 @@ import type {
   GenerationProgress,
   GenerationSettings,
   RifeTargetFps,
+  SamplerName,
+  SchedulerName,
   ShootingStyleId,
   StartFrameReference,
 } from './types/video';
@@ -76,6 +98,10 @@ function getInitialSettings(): GenerationSettings {
   const defaults: GenerationSettings = {
     serverUrl: 'http://127.0.0.1:8188',
     comfyDir: DEFAULT_COMFY_DIR,
+    comfyInstances: {
+      '1': { ...DEFAULT_COMFY_INSTANCES_SETTINGS['1'] },
+      '2': { ...DEFAULT_COMFY_INSTANCES_SETTINGS['2'] },
+    },
     mode: 't2v',
     modelId: 'auto',
     durationSec: 5,
@@ -94,6 +120,14 @@ function getInitialSettings(): GenerationSettings {
     offlineMode: false,
     localLlmUrl: '',
     localLlmModel: '',
+    fastLightX2V: false,
+    samplerName: 'uni_pc',
+    scheduler: 'simple',
+    customLoraName: '',
+    customLoraStrength: 0.8,
+    autoCropStartFrame: true,
+    preventColorDrift: true,
+    autoTranslateRuPrompt: true,
   };
 
   const saved = loadSavedSettings();
@@ -119,6 +153,14 @@ function getInitialSettings(): GenerationSettings {
   const validStyle: ShootingStyleId = SHOOTING_STYLES.some((s) => s.id === saved.shootingStyle)
     ? (saved.shootingStyle as ShootingStyleId)
     : 'arri-35mm';
+  const validSampler: SamplerName = SAMPLER_CHOICES.includes(saved.samplerName as SamplerName)
+    ? (saved.samplerName as SamplerName)
+    : 'uni_pc';
+  const validScheduler: SchedulerName = SCHEDULER_CHOICES.includes(
+    saved.scheduler as SchedulerName,
+  )
+    ? (saved.scheduler as SchedulerName)
+    : 'simple';
 
   return {
     ...defaults,
@@ -127,6 +169,7 @@ function getInitialSettings(): GenerationSettings {
       typeof saved.comfyDir === 'string' && saved.comfyDir.trim().length > 0
         ? saved.comfyDir.trim()
         : DEFAULT_COMFY_DIR,
+    comfyInstances: normalizeComfyInstancesSettings(saved.comfyInstances),
     mode: validMode,
     modelId: validModelId,
     durationSec: validDuration,
@@ -139,6 +182,17 @@ function getInitialSettings(): GenerationSettings {
     offlineMode: Boolean(saved.offlineMode),
     localLlmUrl: typeof saved.localLlmUrl === 'string' ? saved.localLlmUrl : '',
     localLlmModel: typeof saved.localLlmModel === 'string' ? saved.localLlmModel : '',
+    fastLightX2V: Boolean(saved.fastLightX2V),
+    samplerName: validSampler,
+    scheduler: validScheduler,
+    customLoraName: typeof saved.customLoraName === 'string' ? saved.customLoraName : '',
+    customLoraStrength:
+      typeof saved.customLoraStrength === 'number' && Number.isFinite(saved.customLoraStrength)
+        ? saved.customLoraStrength
+        : 0.8,
+    autoCropStartFrame: saved.autoCropStartFrame !== false,
+    preventColorDrift: saved.preventColorDrift !== false,
+    autoTranslateRuPrompt: saved.autoTranslateRuPrompt !== false,
   };
 }
 
@@ -153,7 +207,10 @@ export default function App() {
   const [settings, setSettings] = useState<GenerationSettings>(getInitialSettings);
   const [connection, setConnection] = useState<ConnectionInfo>({ status: 'idle' });
   const [startFrame, setStartFrame] = useState<StartFrameReference | null>(null);
+  const [endFrame, setEndFrame] = useState<StartFrameReference | null>(null);
   const [characters, setCharacters] = useState<CharacterReference[]>([]);
+  const [availableLoras, setAvailableLoras] = useState<string[]>([]);
+  const [isLoadingLoras, setIsLoadingLoras] = useState(false);
 
   const [prompt, setPrompt] = useState('');
   const [originalPromptBeforeEnhance, setOriginalPromptBeforeEnhance] = useState<string | null>(
@@ -165,6 +222,7 @@ export default function App() {
   const [storyboardEnabled, setStoryboardEnabled] = useState(false);
   const [storyboardShots, setStoryboardShots] = useState<StoryboardShot[]>([]);
   const [isEnhancing, setIsEnhancing] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
   const [enhanceError, setEnhanceError] = useState<string | null>(null);
   const [enhanceSourceLabel, setEnhanceSourceLabel] = useState<string | null>(null);
 
@@ -182,14 +240,21 @@ export default function App() {
     const initial = loadHistory();
     return initial[0] ?? null;
   });
+  const [batchQueue, setBatchQueue] = useState<BatchQueueItem[]>(() => loadBatchQueue());
+  const [isRunningBatchQueue, setIsRunningBatchQueue] = useState(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const stopBatchQueueRef = useRef(false);
+  const batchQueueRef = useRef<BatchQueueItem[]>(batchQueue);
+  batchQueueRef.current = batchQueue;
   const historyRef = useRef<GenerationHistoryItem[]>(history);
   historyRef.current = history;
   const charactersRef = useRef<CharacterReference[]>(characters);
   charactersRef.current = characters;
   const startFrameRef = useRef<StartFrameReference | null>(startFrame);
   startFrameRef.current = startFrame;
+  const endFrameRef = useRef<StartFrameReference | null>(endFrame);
+  endFrameRef.current = endFrame;
 
   const isGenerating =
     progress.phase === 'uploading' ||
@@ -229,12 +294,19 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    saveBatchQueue(batchQueue);
+  }, [batchQueue]);
+
+  useEffect(() => {
     return () => {
       for (const char of charactersRef.current) {
         URL.revokeObjectURL(char.previewUrl);
       }
       if (startFrameRef.current) {
         URL.revokeObjectURL(startFrameRef.current.previewUrl);
+      }
+      if (endFrameRef.current) {
+        URL.revokeObjectURL(endFrameRef.current.previewUrl);
       }
     };
   }, []);
@@ -272,6 +344,42 @@ export default function App() {
     setExtendingSourceVideo(null);
   }, []);
 
+  const handleSelectEndFrameFile = useCallback((file: File) => {
+    setEndFrame((prev) => {
+      if (prev) {
+        URL.revokeObjectURL(prev.previewUrl);
+      }
+      return {
+        file,
+        previewUrl: URL.createObjectURL(file),
+      };
+    });
+    setGenerationError(null);
+  }, []);
+
+  const handleClearEndFrame = useCallback(() => {
+    setEndFrame((prev) => {
+      if (prev) {
+        URL.revokeObjectURL(prev.previewUrl);
+      }
+      return null;
+    });
+  }, []);
+
+  const handleRefreshLoras = useCallback(
+    async (urlOverride?: string) => {
+      const targetUrl = urlOverride ?? settings.serverUrl;
+      setIsLoadingLoras(true);
+      try {
+        const loras = await fetchAvailableLoras(targetUrl);
+        setAvailableLoras(loras);
+      } finally {
+        setIsLoadingLoras(false);
+      }
+    },
+    [settings.serverUrl],
+  );
+
   useEffect(() => {
     if (!isElectronComfyBridgeAvailable()) return;
     let active = true;
@@ -291,10 +399,14 @@ export default function App() {
     void checkConnection(settings.serverUrl, 3500)
       .then((result) => {
         if (!active) return;
+        const resolvedUrl = result.detectedUrl || settings.serverUrl;
         if (result.detectedUrl && result.detectedUrl !== settings.serverUrl) {
           setSettings((prev) => ({ ...prev, serverUrl: result.detectedUrl! }));
         }
         setConnection(result);
+        if (result.status === 'online') {
+          void handleRefreshLoras(resolvedUrl);
+        }
       })
       .catch(() => undefined);
 
@@ -308,11 +420,15 @@ export default function App() {
   const handleCheckConnection = useCallback(async () => {
     setConnection({ status: 'checking', message: 'Подключение к серверу ComfyUI...' });
     const result = await checkConnection(settings.serverUrl);
+    const resolvedUrl = result.detectedUrl || settings.serverUrl;
     if (result.detectedUrl && result.detectedUrl !== settings.serverUrl) {
       setSettings((prev) => ({ ...prev, serverUrl: result.detectedUrl! }));
     }
     setConnection(result);
-  }, [settings.serverUrl]);
+    if (result.status === 'online') {
+      void handleRefreshLoras(resolvedUrl);
+    }
+  }, [settings.serverUrl, handleRefreshLoras]);
 
   const handleAddCharacterFiles = useCallback((files: File[]) => {
     setCharacters((prev) => {
@@ -411,6 +527,32 @@ export default function App() {
       setIsEnhancing(false);
     }
   }, [prompt, settings, characters, cameraPreset, lightingPreset, originalPromptBeforeEnhance]);
+
+  const handleTranslatePrompt = useCallback(async () => {
+    const trimmed = prompt.trim();
+    if (!trimmed || !settings.localLlmUrl?.trim()) return;
+    setIsTranslating(true);
+    setEnhanceError(null);
+    try {
+      const translated = await translatePromptToEnglishViaLocalLlm(trimmed, {
+        url: settings.localLlmUrl,
+        model: settings.localLlmModel,
+      });
+      if (!translated) {
+        setEnhanceError(
+          'Локальная LLM не ответила на запрос перевода. Проверьте запущен ли Ollama / LM Studio.',
+        );
+        return;
+      }
+      if (originalPromptBeforeEnhance === null) {
+        setOriginalPromptBeforeEnhance(trimmed);
+      }
+      setPrompt(translated);
+      setEnhanceSourceLabel('Переведено RU → EN (локальная LLM)');
+    } finally {
+      setIsTranslating(false);
+    }
+  }, [prompt, settings.localLlmUrl, settings.localLlmModel, originalPromptBeforeEnhance]);
 
   const handleRevertEnhancedPrompt = useCallback(() => {
     if (originalPromptBeforeEnhance !== null) {
@@ -566,8 +708,27 @@ export default function App() {
               }))
           : [];
 
+      let promptForComfy = activePrompt;
+      if (
+        runSettings.autoTranslateRuPrompt !== false &&
+        runSettings.localLlmUrl?.trim() &&
+        containsCyrillic(activePrompt)
+      ) {
+        setProgress((prev) => ({
+          ...prev,
+          message: 'Перевод русского промпта на английский (локальная LLM)...',
+        }));
+        const translated = await translatePromptToEnglishViaLocalLlm(activePrompt, {
+          url: runSettings.localLlmUrl,
+          model: runSettings.localLlmModel,
+        });
+        if (translated) {
+          promptForComfy = translated;
+        }
+      }
+
       const styledPrompt = applyShootingStyleToPrompt(
-        activePrompt,
+        promptForComfy,
         runSettings.shootingStyle,
         originalPromptBeforeEnhance !== null,
       );
@@ -588,6 +749,7 @@ export default function App() {
             : undefined,
         defaultCamera: cameraPreset,
         startFrame,
+        endFrame: runSettings.mode === 'i2v' ? endFrame : null,
         isContinuation: Boolean(extendingSourceVideo),
         fallbackCharacterAnchors,
         signal: controller.signal,
@@ -766,6 +928,7 @@ export default function App() {
     negativePrompt,
     characters,
     startFrame,
+    endFrame,
     originalPromptBeforeEnhance,
     extendingSourceVideo,
     storyboardEnabled,
@@ -775,8 +938,189 @@ export default function App() {
   ]);
 
   const handleCancelGeneration = useCallback(() => {
+    stopBatchQueueRef.current = true;
     abortControllerRef.current?.abort();
   }, []);
+
+  const handleAddToBatchQueue = useCallback(() => {
+    const activePrompt = prompt.trim();
+    if (!activePrompt) {
+      setGenerationError('Введите описание сцены перед добавлением в очередь.');
+      return;
+    }
+    if (settings.mode === 'i2v' && !startFrame) {
+      setGenerationError(
+        'Для режима I2V в очереди выберите стартовый кадр или переключитесь на «Текст → Видео».',
+      );
+      return;
+    }
+    const item = createBatchQueueItem({
+      prompt: activePrompt,
+      negativePrompt,
+      cameraPreset,
+      lightingPreset,
+      settings,
+    });
+    setBatchQueue((prev) => enqueueBatchItem(prev, item));
+    setGenerationError(null);
+    if (activeTab !== 'studio') {
+      setActiveTab('studio');
+    }
+  }, [prompt, negativePrompt, cameraPreset, lightingPreset, settings, startFrame, activeTab]);
+
+  const handleRemoveBatchItem = useCallback((id: string) => {
+    setBatchQueue((prev) => removeBatchItem(prev, id));
+  }, []);
+
+  const handleClearFinishedBatchItems = useCallback(() => {
+    setBatchQueue((prev) => clearFinishedBatchItems(prev));
+  }, []);
+
+  const handleStopBatchQueue = useCallback(() => {
+    stopBatchQueueRef.current = true;
+    abortControllerRef.current?.abort();
+  }, []);
+
+  const handleStartBatchQueue = useCallback(async () => {
+    if (isRunningBatchQueue || isGenerating) return;
+    stopBatchQueueRef.current = false;
+    setIsRunningBatchQueue(true);
+    setGenerationError(null);
+    setPreflightReport(null);
+
+    try {
+      while (!stopBatchQueueRef.current) {
+        const nextJob = getNextPendingBatchItem(batchQueueRef.current);
+        if (!nextJob) break;
+
+        setBatchQueue((prev) => updateBatchItem(prev, nextJob.id, { status: 'running', error: undefined }));
+
+        const effectiveSeed = nextJob.settings.seedLocked ? nextJob.settings.seed : randomSeed();
+        const runSettings: GenerationSettings = { ...nextJob.settings, seed: effectiveSeed };
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
+
+        setProgress({
+          phase: 'uploading',
+          percent: 4,
+          segmentIndex: 1,
+          totalSegments: Math.ceil(runSettings.durationSec / SEGMENT_DURATION_SEC),
+          segmentStartSec: 0,
+          segmentEndSec: SEGMENT_DURATION_SEC,
+          segmentMode: runSettings.mode,
+          message: `Очередь: запуск сцены «${nextJob.prompt.slice(0, 48)}»...`,
+        });
+
+        try {
+          let promptForComfy = nextJob.prompt;
+          if (
+            runSettings.autoTranslateRuPrompt !== false &&
+            runSettings.localLlmUrl?.trim() &&
+            containsCyrillic(nextJob.prompt)
+          ) {
+            const translated = await translatePromptToEnglishViaLocalLlm(nextJob.prompt, {
+              url: runSettings.localLlmUrl,
+              model: runSettings.localLlmModel,
+            });
+            if (translated) promptForComfy = translated;
+          }
+
+          const styledPrompt = applyShootingStyleToPrompt(
+            promptForComfy,
+            runSettings.shootingStyle,
+            false,
+          );
+          const effectivePositivePrompt = applyLightingToPrompt(
+            styledPrompt,
+            nextJob.lightingPreset,
+            false,
+          );
+
+          const result = await runComfyGeneration({
+            settings: runSettings,
+            positivePrompt: effectivePositivePrompt,
+            negativePrompt: nextJob.negativePrompt,
+            characters: [],
+            defaultCamera: nextJob.cameraPreset,
+            startFrame: runSettings.mode === 'i2v' ? startFrameRef.current : null,
+            endFrame: runSettings.mode === 'i2v' ? endFrameRef.current : null,
+            signal: controller.signal,
+            onProgress: setProgress,
+          });
+
+          const modelOption = getModelOption(runSettings.modelId);
+          const lastRenderedSeg = result.segments[result.segments.length - 1];
+          const historyItem: GenerationHistoryItem = {
+            id: result.promptId,
+            createdAt: new Date().toISOString(),
+            mode: runSettings.mode,
+            prompt: nextJob.prompt,
+            enhancedPrompt: promptForComfy !== nextJob.prompt ? promptForComfy : undefined,
+            negativePrompt: nextJob.negativePrompt,
+            modelId: runSettings.modelId,
+            modelLabel: modelOption.shortLabel,
+            width: runSettings.width,
+            height: runSettings.height,
+            durationSec: runSettings.durationSec,
+            fps: runSettings.fps,
+            outputFps: computeOutputFps(runSettings.fps, runSettings.rifeEnabled),
+            upscale1080p: runSettings.upscale1080p,
+            rifeEnabled: runSettings.rifeEnabled,
+            rifeTargetFps: runSettings.rifeTargetFps,
+            shootingStyle: runSettings.shootingStyle,
+            frames: runSettings.frames,
+            steps: runSettings.steps,
+            seed: runSettings.seed,
+            characters: [],
+            videoUrl: result.output.viewUrl,
+            filename: result.output.filename,
+            subfolder: result.output.subfolder,
+            fileType: result.output.type,
+            serverUrl: runSettings.serverUrl,
+            localFilePath: lastRenderedSeg?.localFilePath,
+            segments: result.segments,
+          };
+
+          setHistory((prev) => [historyItem, ...prev.filter((h) => h.id !== historyItem.id)]);
+          setActiveVideo(historyItem);
+          setBatchQueue((prev) =>
+            updateBatchItem(prev, nextJob.id, {
+              status: 'completed',
+              resultHistoryId: historyItem.id,
+            }),
+          );
+        } catch (err) {
+          const isCancelled = controller.signal.aborted || stopBatchQueueRef.current;
+          const rawMsg =
+            err instanceof Error ? err.message : 'Ошибка выполнения задачи в очереди ComfyUI.';
+          const formatted = formatGenerationErrorMessage({
+            message: rawMsg,
+            serverUrl: runSettings.serverUrl,
+            isElectron: isElectronComfyBridgeAvailable(),
+            pageProtocol:
+              typeof window !== 'undefined' && window.location
+                ? window.location.protocol
+                : undefined,
+          });
+          setBatchQueue((prev) =>
+            updateBatchItem(prev, nextJob.id, {
+              status: isCancelled ? 'pending' : 'failed',
+              error: isCancelled ? undefined : formatted,
+            }),
+          );
+          if (isCancelled) {
+            setProgress({ phase: 'cancelled', percent: 0, message: 'Очередь остановлена.' });
+            break;
+          }
+          setGenerationError(formatted);
+        } finally {
+          abortControllerRef.current = null;
+        }
+      }
+    } finally {
+      setIsRunningBatchQueue(false);
+    }
+  }, [isRunningBatchQueue, isGenerating]);
 
   const handleExportScenePreset = useCallback(
     () =>
@@ -964,15 +1308,26 @@ export default function App() {
                 <span>Остановить</span>
               </button>
             ) : (
-              <button
-                type="button"
-                onClick={() => void handleGenerate()}
-                className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md bg-[#E58E26] px-3.5 py-2 text-xs font-semibold text-[#0B0D11] transition-colors hover:bg-[#EE9B38] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E58E26] sm:px-4"
-              >
-                <Play className="h-3.5 w-3.5 fill-current" aria-hidden="true" />
-                <span className="hidden sm:inline">Сгенерировать видео</span>
-                <span className="sm:hidden">Создать</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleAddToBatchQueue}
+                  title="Добавить текущую сцену в очередь пакетной генерации"
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md border border-[#2B3242] bg-[#1A1F2B] px-3 py-2 text-xs font-medium text-[#E2E8F0] transition-colors hover:border-[#3A4358] hover:bg-[#222838] focus-visible:outline-2 focus-visible:outline-[#E58E26]"
+                >
+                  <ListPlus className="h-3.5 w-3.5 text-[#F6AD55]" aria-hidden="true" />
+                  <span className="hidden sm:inline">В очередь</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleGenerate()}
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-md bg-[#E58E26] px-3.5 py-2 text-xs font-semibold text-[#0B0D11] transition-colors hover:bg-[#EE9B38] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#E58E26] sm:px-4"
+                >
+                  <Play className="h-3.5 w-3.5 fill-current" aria-hidden="true" />
+                  <span className="hidden sm:inline">Сгенерировать видео</span>
+                  <span className="sm:hidden">Создать</span>
+                </button>
+              </div>
             )}
           </div>
         </div>
@@ -1087,25 +1442,38 @@ export default function App() {
                 <SettingsPanel
                   settings={settings}
                   connection={connection}
+                  availableLoras={availableLoras}
+                  isLoadingLoras={isLoadingLoras}
                   disabled={isGenerating}
                   onChange={handleSettingsChange}
                   onCheckConnection={() => void handleCheckConnection()}
+                  onRefreshLoras={() => void handleRefreshLoras()}
                   onRandomizeSeed={() => handleSettingsChange({ seed: randomSeed() })}
                 />
 
                 <ComfyLauncherPanel
                   comfyDir={settings.comfyDir}
+                  instancesConfig={
+                    settings.comfyInstances ?? DEFAULT_COMFY_INSTANCES_SETTINGS
+                  }
+                  serverUrl={settings.serverUrl}
                   connectionStatus={connection.status}
                   disabled={isGenerating}
+                  onChangeInstancesConfig={(nextInstances) =>
+                    handleSettingsChange({ comfyInstances: nextInstances })
+                  }
                   onCheckConnection={() => void handleCheckConnection()}
                 />
 
                 {settings.mode === 'i2v' && (
                   <StartFramePanel
                     startFrame={startFrame}
+                    endFrame={endFrame}
                     disabled={isGenerating}
                     onSelectFile={(file) => handleSelectStartFrameFile(file)}
                     onClear={handleClearStartFrame}
+                    onSelectEndFrameFile={handleSelectEndFrameFile}
+                    onClearEndFrame={handleClearEndFrame}
                   />
                 )}
 
@@ -1127,6 +1495,7 @@ export default function App() {
                   lightingPreset={lightingPreset}
                   enhanceSourceLabel={enhanceSourceLabel}
                   isEnhancing={isEnhancing}
+                  isTranslating={isTranslating}
                   enhanceError={enhanceError}
                   offlineMode={Boolean(settings.offlineMode)}
                   hasLocalLlm={Boolean(settings.localLlmUrl?.trim())}
@@ -1136,6 +1505,7 @@ export default function App() {
                   onCameraPresetChange={setCameraPreset}
                   onLightingPresetChange={setLightingPreset}
                   onEnhancePrompt={() => void handleEnhancePrompt()}
+                  onTranslatePrompt={() => void handleTranslatePrompt()}
                   onRevertEnhancedPrompt={handleRevertEnhancedPrompt}
                 />
 
@@ -1156,8 +1526,19 @@ export default function App() {
               </div>
 
               {/* Right Preview & History Stage */}
-              <div className="px-5 py-6 sm:px-8">
+              <div className="space-y-6 px-5 py-6 sm:px-8">
+                <BatchQueuePanel
+                  items={batchQueue}
+                  isRunningQueue={isRunningBatchQueue}
+                  isGenerating={isGenerating}
+                  onStartQueue={() => void handleStartBatchQueue()}
+                  onStopQueue={handleStopBatchQueue}
+                  onRemoveItem={handleRemoveBatchItem}
+                  onClearFinished={handleClearFinishedBatchItems}
+                />
+
                 <PreviewAndHistoryPanel
+                  comfyDir={settings.comfyDir}
                   progress={progress}
                   generationError={generationError}
                   preflightReport={preflightReport}
@@ -1209,6 +1590,7 @@ export default function App() {
             negativePrompt={negativePrompt}
             characters={characters}
             startFrame={startFrame}
+            endFrame={endFrame}
           />
         )}
 

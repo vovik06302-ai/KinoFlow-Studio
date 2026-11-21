@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DEFAULT_COMFY_INSTANCES_SETTINGS,
   HISTORY_AUTOSAVE_INTERVAL_MS,
   loadHistory,
+  normalizeComfyInstancesSettings,
   sanitizeHistoryItems,
   saveHistory,
   startHistoryAutoSave,
@@ -195,4 +197,27 @@ test('saveHistory and loadHistory round-trip via window.localStorage', () => {
     }
   }
 });
+
+test('normalizeComfyInstancesSettings validates GPU index (0-7) and port (1024-65535) with safe defaults', () => {
+  assert.deepEqual(normalizeComfyInstancesSettings(undefined), DEFAULT_COMFY_INSTANCES_SETTINGS);
+  assert.deepEqual(
+    normalizeComfyInstancesSettings({
+      '1': { gpuIndex: 0, port: 8188 },
+      '2': { gpuIndex: 3, port: 8190 },
+    }),
+    {
+      '1': { gpuIndex: 0, port: 8188 },
+      '2': { gpuIndex: 3, port: 8190 },
+    },
+  );
+  // Invalid out-of-range values fall back to safe defaults
+  assert.deepEqual(
+    normalizeComfyInstancesSettings({
+      '1': { gpuIndex: 9, port: 80 },
+      '2': { gpuIndex: -1, port: 99999 },
+    }),
+    DEFAULT_COMFY_INSTANCES_SETTINGS,
+  );
+});
+
 

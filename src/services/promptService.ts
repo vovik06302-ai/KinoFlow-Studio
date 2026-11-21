@@ -182,6 +182,97 @@ export async function enhancePromptViaLocalLlm(
   return cleaned;
 }
 
+/** Returns true if the text contains Cyrillic characters (Russian/Ukrainian/etc.). */
+export function containsCyrillic(text: string): boolean {
+  return /[А-Яа-яЁё]/.test(text);
+}
+
+/**
+ * Translates a Russian/Cyrillic video prompt directly into crisp, natural English for Wan 2.2
+ * using a local Ollama or OpenAI-compatible LM Studio server with zero cloud traffic.
+ */
+export async function translatePromptToEnglishViaLocalLlm(
+  text: string,
+  options: { url: string; model?: string; fetchImpl?: typeof fetch },
+): Promise<string> {
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+  if (!containsCyrillic(trimmed)) return trimmed;
+
+  const baseUrl = options.url.trim().replace(/\/+$/, '');
+  const modelName = (options.model ?? '').trim() || 'qwen2.5:7b';
+  const fetchImpl = options.fetchImpl ?? fetch;
+
+  const isOllamaNative = /:11434$/i.test(baseUrl) && !/\/v1$/i.test(baseUrl);
+  const endpoint = isOllamaNative
+    ? `${baseUrl}/api/chat`
+    : /\/v1$/i.test(baseUrl)
+      ? `${baseUrl}/chat/completions`
+      : `${baseUrl}/v1/chat/completions`;
+
+  const systemPrompt =
+    'You are a precise cinematic translator for Wan 2.2 video generation. Translate the user prompt into natural, descriptive English preserving every visual detail, subject, camera action, and lighting cue. Do NOT invent new plot elements or add quotes/markdown. Output ONLY the English translation.';
+
+  const payload = isOllamaNative
+    ? JSON.stringify({
+        model: modelName,
+        stream: false,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: trimmed },
+        ],
+      })
+    : JSON.stringify({
+        model: modelName,
+        temperature: 0.2,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: trimmed },
+        ],
+      });
+
+  const electronBridge =
+    typeof window !== 'undefined'
+      ? (window as unknown as { kinoflowComfy?: ElectronHttpBridge }).kinoflowComfy
+      : undefined;
+
+  let bodyText: string;
+  if (electronBridge?.request && !options.fetchImpl) {
+    const res = await electronBridge.request({
+      url: endpoint,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+      timeoutMs: 30_000,
+    });
+    if (!res.ok) {
+      throw new Error(`Локальная LLM (${endpoint}) ответила ошибкой ${res.status || ''}`);
+    }
+    bodyText = res.bodyText;
+  } else {
+    const response = await fetchImpl(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+    });
+    if (!response.ok) {
+      throw new Error(`Локальная LLM ответила статусом HTTP ${response.status}.`);
+    }
+    bodyText = await response.text();
+  }
+
+  const parsed = JSON.parse(bodyText) as {
+    message?: { content?: string };
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  const raw = parsed.message?.content ?? parsed.choices?.[0]?.message?.content ?? '';
+  const cleaned = cleanLlmResponseText(raw);
+  if (!cleaned) {
+    throw new Error('Локальная LLM вернула пустой перевод.');
+  }
+  return cleaned;
+}
+
 export async function parseEnhancePromptResponse(response: Response): Promise<string> {
   const contentType = (response.headers.get('content-type') ?? '').toLowerCase();
   const bodyText = await response.text().catch(() => '');

@@ -1,10 +1,21 @@
 import { useState } from 'react';
 import type { ChangeEvent } from 'react';
-import { ChevronDown, Dices, Lock, RefreshCw, Unlock } from 'lucide-react';
+import {
+  AlertTriangle,
+  ChevronDown,
+  Dices,
+  Lock,
+  RefreshCw,
+  ShieldCheck,
+  Unlock,
+  Zap,
+} from 'lucide-react';
 import {
   DURATION_CHOICES,
   FPS_CHOICES,
   RESOLUTION_PRESETS,
+  SAMPLER_CHOICES,
+  SCHEDULER_CHOICES,
   SEGMENT_DURATION_SEC,
   SHOOTING_STYLES,
   VIDEO_MODELS,
@@ -14,21 +25,27 @@ import {
   planGenerationSegments,
   secondsToAlignedFrames,
 } from '../services/comfyService';
+import { estimateVramUsage } from '../services/vramEstimator';
 import type {
   BaseModelId,
   ConnectionInfo,
   DurationChoice,
   FpsChoice,
   GenerationSettings,
+  SamplerName,
+  SchedulerName,
   ShootingStyleId,
 } from '../types/video';
 
 interface SettingsPanelProps {
   settings: GenerationSettings;
   connection: ConnectionInfo;
+  availableLoras?: string[];
+  isLoadingLoras?: boolean;
   disabled: boolean;
   onChange: (patch: Partial<GenerationSettings>) => void;
   onCheckConnection: () => void;
+  onRefreshLoras?: () => void;
   onRandomizeSeed: () => void;
 }
 
@@ -50,9 +67,12 @@ function formatSegmentsRu(count: number): string {
 export function SettingsPanel({
   settings,
   connection,
+  availableLoras = [],
+  isLoadingLoras = false,
   disabled,
   onChange,
   onCheckConnection,
+  onRefreshLoras,
   onRandomizeSeed,
 }: SettingsPanelProps) {
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -61,6 +81,36 @@ export function SettingsPanel({
   const upscaleTarget = computeUpscaleTargetSize(settings.width, settings.height);
   const segmentCount = planGenerationSegments(settings.durationSec, settings.mode).length;
   const framesPerSegment = secondsToAlignedFrames(SEGMENT_DURATION_SEC, settings.fps);
+
+  const vramEstimate = estimateVramUsage({
+    modelId: settings.modelId,
+    width: settings.width,
+    height: settings.height,
+    frames: framesPerSegment,
+    upscale1080p: settings.upscale1080p,
+    rifeEnabled: settings.rifeEnabled,
+    fastLightX2V: settings.fastLightX2V,
+    vramTotalGb: connection.vramTotalGb,
+  });
+
+  const handleToggleLightX2V = (enabled: boolean) => {
+    if (enabled) {
+      onChange({
+        fastLightX2V: true,
+        steps: settings.steps > 8 ? 6 : Math.max(4, settings.steps),
+        cfg: 1.0,
+        cfgLow: 1.0,
+        flowShift: settings.flowShift ?? 5.0,
+      });
+    } else {
+      onChange({
+        fastLightX2V: false,
+        steps: settings.steps <= 8 ? activeModel.defaultSteps : settings.steps,
+        cfg: undefined,
+        cfgLow: undefined,
+      });
+    }
+  };
 
   const handleModelChange = (e: ChangeEvent<HTMLSelectElement>) => {
     const nextModelId = e.target.value as BaseModelId;
@@ -175,11 +225,12 @@ export function SettingsPanel({
           </button>
         </div>
 
-        <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[#64748B]">
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px] text-[#64748B]">
           <span>Быстрый порт:</span>
           {[
             { label: '8188 · Portable', url: 'http://127.0.0.1:8188' },
             { label: '8000 · Desktop', url: 'http://127.0.0.1:8000' },
+            { label: '8189 · Вторая карта', url: 'http://127.0.0.1:8189' },
           ].map((preset) => {
             const isCurrent = settings.serverUrl.trim().replace(/\/+$/, '') === preset.url;
             return (
@@ -323,8 +374,8 @@ export function SettingsPanel({
             <input
               id="steps-range"
               type="range"
-              min={8}
-              max={50}
+              min={settings.fastLightX2V ? 4 : 8}
+              max={settings.fastLightX2V ? 12 : 50}
               step={1}
               value={settings.steps}
               disabled={disabled}
@@ -335,7 +386,7 @@ export function SettingsPanel({
             <input
               id="steps-input"
               type="number"
-              min={8}
+              min={4}
               max={50}
               value={settings.steps}
               disabled={disabled}
@@ -406,6 +457,56 @@ export function SettingsPanel({
         </div>
       </div>
 
+      {/* VRAM Usage Estimator & OOM Safety Guard */}
+      <div
+        data-testid="vram-estimate-banner"
+        className={`mt-4 rounded-md border px-3 py-2.5 text-xs ${
+          vramEstimate.level === 'oom_risk'
+            ? 'border-[#7F1D1D] bg-[#241013] text-[#FCA5A5]'
+            : vramEstimate.level === 'tight'
+              ? 'border-[#784A18] bg-[#22170A] text-[#FBD38D]'
+              : 'border-[#222734] bg-[#121620] text-[#94A3B8]'
+        }`}
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex min-w-0 items-start gap-2">
+            {vramEstimate.level === 'ok' ? (
+              <ShieldCheck
+                className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#22C55E]"
+                aria-hidden="true"
+              />
+            ) : (
+              <AlertTriangle
+                className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${
+                  vramEstimate.level === 'oom_risk' ? 'text-[#EF4444]' : 'text-[#F59E0B]'
+                }`}
+                aria-hidden="true"
+              />
+            )}
+            <div className="min-w-0">
+              <p className="font-mono text-[11px] font-medium text-[#E2E8F0]">
+                {vramEstimate.headline}
+              </p>
+              {vramEstimate.recommendation && (
+                <p className="mt-1 text-[11px] leading-relaxed opacity-90">
+                  {vramEstimate.recommendation}
+                </p>
+              )}
+            </div>
+          </div>
+          {vramEstimate.safePatch && (
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => onChange(vramEstimate.safePatch!)}
+              className="shrink-0 whitespace-nowrap rounded border border-[#E58E26]/60 bg-[#E58E26]/15 px-2.5 py-1 text-[11px] font-semibold text-[#F6AD55] transition-colors hover:bg-[#E58E26]/25 disabled:opacity-50"
+            >
+              Безопасные параметры
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Realism & Post-Processing Block */}
       <div className="mt-5 border-t border-[#1E2330] pt-5">
         <div className="mb-3 flex items-baseline justify-between gap-2">
@@ -445,8 +546,35 @@ export function SettingsPanel({
           <p className="mt-1.5 text-[11px] text-[#64748B]">{activeStyle.description}</p>
         </div>
 
-        {/* Post-processing toggles */}
+        {/* Post-processing & Acceleration toggles */}
         <div className="space-y-2.5">
+          <label
+            htmlFor="lightx2v-turbo-toggle"
+            className={`flex cursor-pointer items-start justify-between gap-3 rounded-md border px-3 py-2.5 transition-colors ${
+              settings.fastLightX2V
+                ? 'border-[#E58E26]/55 bg-[#1D160D]'
+                : 'border-[#222734] bg-[#121620] hover:border-[#2F374A]'
+            }`}
+          >
+            <div className="min-w-0">
+              <span className="flex items-center gap-1.5 text-xs font-medium text-[#E2E8F0]">
+                <Zap className="h-3.5 w-3.5 text-[#F6AD55]" aria-hidden="true" />
+                <span>Турбо-режим LightX2V (4–8 шагов · ×3–4 быстрее)</span>
+              </span>
+              <span className="mt-0.5 block font-mono text-[11px] text-[#64748B]">
+                Узлы #105–106 · LoRA-дистилляция Wan 2.2 · CFG 1.0 · скачать в «Модели и установка»
+              </span>
+            </div>
+            <input
+              id="lightx2v-turbo-toggle"
+              type="checkbox"
+              checked={Boolean(settings.fastLightX2V)}
+              disabled={disabled}
+              onChange={(e) => handleToggleLightX2V(e.target.checked)}
+              className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer rounded border-[#3A4358] bg-[#0D1017] accent-[#E58E26] focus-visible:outline-2 focus-visible:outline-[#E58E26]"
+            />
+          </label>
+
           <label
             htmlFor="upscale-1080p-toggle"
             className="flex cursor-pointer items-start justify-between gap-3 rounded-md border border-[#222734] bg-[#121620] px-3 py-2.5 transition-colors hover:border-[#2F374A]"
@@ -546,6 +674,283 @@ export function SettingsPanel({
               <p className="text-[11px] leading-relaxed text-[#64748B]">{activeModel.vramHint}</p>
             </div>
 
+            {/* Fine Sampler Controls (CFG High/Low, Flow Shift, Sampler, Scheduler) */}
+            <div className="space-y-3 border-t border-[#1E2330] pt-3.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-[#E2E8F0]">
+                  Сэмплер, CFG и Flow Shift
+                </span>
+                <button
+                  type="button"
+                  disabled={disabled}
+                  onClick={() =>
+                    onChange({
+                      cfg: settings.fastLightX2V ? 1.0 : 3.5,
+                      cfgLow: settings.fastLightX2V ? 1.0 : 3.5,
+                      flowShift: 5.0,
+                      samplerName: 'uni_pc',
+                      scheduler: 'simple',
+                    })
+                  }
+                  className="text-[11px] text-[#64748B] transition-colors hover:text-[#CBD5E1] disabled:opacity-50"
+                >
+                  Сбросить
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+                <div>
+                  <label
+                    htmlFor="cfg-high-input"
+                    className="mb-1 block text-[11px] text-[#94A3B8]"
+                  >
+                    CFG High
+                  </label>
+                  <input
+                    id="cfg-high-input"
+                    type="number"
+                    min={1}
+                    max={12}
+                    step={0.5}
+                    value={settings.cfg ?? (settings.fastLightX2V ? 1.0 : 3.5)}
+                    disabled={disabled}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      if (!Number.isNaN(val)) {
+                        onChange({ cfg: Math.max(1, Math.min(12, val)) });
+                      }
+                    }}
+                    className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 font-mono text-xs tabular-nums text-[#F1F5F9] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="cfg-low-input"
+                    className="mb-1 block text-[11px] text-[#94A3B8]"
+                  >
+                    CFG Low
+                  </label>
+                  <input
+                    id="cfg-low-input"
+                    type="number"
+                    min={1}
+                    max={12}
+                    step={0.5}
+                    value={settings.cfgLow ?? settings.cfg ?? (settings.fastLightX2V ? 1.0 : 3.5)}
+                    disabled={disabled}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      if (!Number.isNaN(val)) {
+                        onChange({ cfgLow: Math.max(1, Math.min(12, val)) });
+                      }
+                    }}
+                    className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 font-mono text-xs tabular-nums text-[#F1F5F9] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="flow-shift-input"
+                    className="mb-1 block text-[11px] text-[#94A3B8]"
+                  >
+                    Flow Shift
+                  </label>
+                  <input
+                    id="flow-shift-input"
+                    type="number"
+                    min={1}
+                    max={12}
+                    step={0.5}
+                    value={settings.flowShift ?? 5.0}
+                    disabled={disabled}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      if (!Number.isNaN(val)) {
+                        onChange({ flowShift: Math.max(1, Math.min(12, val)) });
+                      }
+                    }}
+                    className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 font-mono text-xs tabular-nums text-[#F1F5F9] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                <div>
+                  <label
+                    htmlFor="sampler-select"
+                    className="mb-1 block text-[11px] text-[#94A3B8]"
+                  >
+                    Сэмплер
+                  </label>
+                  <select
+                    id="sampler-select"
+                    value={settings.samplerName ?? 'uni_pc'}
+                    disabled={disabled}
+                    onChange={(e) => onChange({ samplerName: e.target.value as SamplerName })}
+                    className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 font-mono text-xs text-[#F1F5F9] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
+                  >
+                    {SAMPLER_CHOICES.map((sampler) => (
+                      <option
+                        key={sampler}
+                        value={sampler}
+                        className="bg-[#141821] text-[#F1F5F9]"
+                      >
+                        {sampler}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="scheduler-select"
+                    className="mb-1 block text-[11px] text-[#94A3B8]"
+                  >
+                    Планировщик (Scheduler)
+                  </label>
+                  <select
+                    id="scheduler-select"
+                    value={settings.scheduler ?? 'simple'}
+                    disabled={disabled}
+                    onChange={(e) => onChange({ scheduler: e.target.value as SchedulerName })}
+                    className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 font-mono text-xs text-[#F1F5F9] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
+                  >
+                    {SCHEDULER_CHOICES.map((sched) => (
+                      <option
+                        key={sched}
+                        value={sched}
+                        className="bg-[#141821] text-[#F1F5F9]"
+                      >
+                        {sched}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {/* Custom LoRA Loader (LoraLoaderModelOnly) */}
+            <div className="space-y-2.5 border-t border-[#1E2330] pt-3.5">
+              <div className="flex items-center justify-between gap-2">
+                <label htmlFor="custom-lora-select" className="text-xs font-medium text-[#E2E8F0]">
+                  Пользовательская LoRA (models/loras)
+                </label>
+                {onRefreshLoras && (
+                  <button
+                    type="button"
+                    disabled={disabled || isLoadingLoras}
+                    onClick={onRefreshLoras}
+                    className="inline-flex items-center gap-1 text-[11px] text-[#94A3B8] transition-colors hover:text-[#E2E8F0] disabled:opacity-50"
+                  >
+                    <RefreshCw
+                      className={`h-3 w-3 ${isLoadingLoras ? 'animate-spin' : ''}`}
+                      aria-hidden="true"
+                    />
+                    <span>Обновить список</span>
+                  </button>
+                )}
+              </div>
+
+              <select
+                id="custom-lora-select"
+                value={settings.customLoraName ?? ''}
+                disabled={disabled}
+                onChange={(e) => onChange({ customLoraName: e.target.value })}
+                className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 font-mono text-xs text-[#F1F5F9] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
+              >
+                <option value="" className="bg-[#141821] text-[#94A3B8]">
+                  Без дополнительной LoRA
+                </option>
+                {availableLoras.map((lora) => (
+                  <option key={lora} value={lora} className="bg-[#141821] text-[#F1F5F9]">
+                    {lora}
+                  </option>
+                ))}
+                {settings.customLoraName &&
+                  !availableLoras.includes(settings.customLoraName) && (
+                    <option
+                      value={settings.customLoraName}
+                      className="bg-[#141821] text-[#F1F5F9]"
+                    >
+                      {settings.customLoraName}
+                    </option>
+                  )}
+              </select>
+
+              {settings.customLoraName && (
+                <div className="flex items-center gap-2.5">
+                  <label
+                    htmlFor="custom-lora-strength"
+                    className="shrink-0 text-[11px] text-[#94A3B8]"
+                  >
+                    Сила LoRA
+                  </label>
+                  <input
+                    id="custom-lora-strength"
+                    type="range"
+                    min={0}
+                    max={1.5}
+                    step={0.05}
+                    value={settings.customLoraStrength ?? 0.8}
+                    disabled={disabled}
+                    onChange={(e) => onChange({ customLoraStrength: Number(e.target.value) })}
+                    className="h-1.5 flex-1 cursor-pointer appearance-none rounded-sm bg-[#262C3A] accent-[#E58E26]"
+                  />
+                  <span className="w-9 text-right font-mono text-xs tabular-nums text-[#E2E8F0]">
+                    {(settings.customLoraStrength ?? 0.8).toFixed(2)}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* I2V Crop & Long-Chain Color-Drift Mitigation */}
+            <div className="space-y-2 border-t border-[#1E2330] pt-3.5">
+              <label
+                htmlFor="auto-crop-i2v-toggle"
+                className="flex cursor-pointer items-start justify-between gap-3 rounded-md border border-[#222734] bg-[#121620] px-3 py-2 transition-colors hover:border-[#2F374A]"
+              >
+                <div className="min-w-0">
+                  <span className="block text-xs font-medium text-[#E2E8F0]">
+                    Авто-кадрирование фото в I2V (center crop)
+                  </span>
+                  <span className="mt-0.5 block text-[11px] text-[#64748B]">
+                    Узлы #70–71 · подгоняет фото под пропорции ролика без растягивания лиц
+                  </span>
+                </div>
+                <input
+                  id="auto-crop-i2v-toggle"
+                  type="checkbox"
+                  checked={settings.autoCropStartFrame !== false}
+                  disabled={disabled}
+                  onChange={(e) => onChange({ autoCropStartFrame: e.target.checked })}
+                  className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer rounded border-[#3A4358] bg-[#0D1017] accent-[#E58E26]"
+                />
+              </label>
+
+              <label
+                htmlFor="color-drift-toggle"
+                className="flex cursor-pointer items-start justify-between gap-3 rounded-md border border-[#222734] bg-[#121620] px-3 py-2 transition-colors hover:border-[#2F374A]"
+              >
+                <div className="min-w-0">
+                  <span className="block text-xs font-medium text-[#E2E8F0]">
+                    Защита от дрейфа цвета в цепочках 10–30с
+                  </span>
+                  <span className="mt-0.5 block text-[11px] text-[#64748B]">
+                    Мягкое снижение CFG/Shift со 2-го сегмента и CRF 14 для промежуточных кадров
+                  </span>
+                </div>
+                <input
+                  id="color-drift-toggle"
+                  type="checkbox"
+                  checked={settings.preventColorDrift !== false}
+                  disabled={disabled}
+                  onChange={(e) => onChange({ preventColorDrift: e.target.checked })}
+                  className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer rounded border-[#3A4358] bg-[#0D1017] accent-[#E58E26]"
+                />
+              </label>
+            </div>
+
             <div className="space-y-2.5 border-t border-[#1E2330] pt-3.5">
               <label
                 htmlFor="offline-mode-toggle"
@@ -601,6 +1006,21 @@ export function SettingsPanel({
                     className="rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 font-mono text-xs text-[#F1F5F9] placeholder-[#475569] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
                   />
                 </div>
+
+                <label
+                  htmlFor="auto-translate-ru-toggle"
+                  className="flex cursor-pointer items-center justify-between gap-2 pt-1 text-[11px] text-[#94A3B8]"
+                >
+                  <span>Автоперевод русских промптов на английский перед генерацией</span>
+                  <input
+                    id="auto-translate-ru-toggle"
+                    type="checkbox"
+                    checked={settings.autoTranslateRuPrompt !== false}
+                    disabled={disabled}
+                    onChange={(e) => onChange({ autoTranslateRuPrompt: e.target.checked })}
+                    className="h-3.5 w-3.5 shrink-0 cursor-pointer rounded border-[#3A4358] bg-[#0D1017] accent-[#E58E26]"
+                  />
+                </label>
               </div>
             </div>
           </div>

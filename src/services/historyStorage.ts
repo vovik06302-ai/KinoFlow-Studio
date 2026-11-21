@@ -1,4 +1,5 @@
 import type {
+  ComfyInstancesSettings,
   GenerationHistoryItem,
   GenerationSettings,
   HistoryCharacterSummary,
@@ -134,6 +135,51 @@ export function startHistoryAutoSave(
       windowTarget.removeEventListener('beforeunload', flush);
       windowTarget.removeEventListener('pagehide', flush);
     }
+  };
+}
+
+export const DEFAULT_COMFY_INSTANCES_SETTINGS: ComfyInstancesSettings = {
+  '1': { gpuIndex: 0, port: 8188 },
+  '2': { gpuIndex: 1, port: 8189 },
+};
+
+function normalizeSingleInstance(
+  raw: unknown,
+  fallback: { gpuIndex: number; port: number },
+): { gpuIndex: number; port: number } {
+  if (!raw || typeof raw !== 'object') {
+    return { ...fallback };
+  }
+  const obj = raw as Record<string, unknown>;
+  const gpuIndex =
+    typeof obj.gpuIndex === 'number' &&
+    Number.isInteger(obj.gpuIndex) &&
+    obj.gpuIndex >= 0 &&
+    obj.gpuIndex <= 7
+      ? obj.gpuIndex
+      : fallback.gpuIndex;
+  const port =
+    typeof obj.port === 'number' &&
+    Number.isInteger(obj.port) &&
+    obj.port >= 1024 &&
+    obj.port <= 65535
+      ? obj.port
+      : fallback.port;
+  return { gpuIndex, port };
+}
+
+/** Validates saved GPU index (0–7) and port (1024–65535) for both ComfyUI instances on load. */
+export function normalizeComfyInstancesSettings(raw: unknown): ComfyInstancesSettings {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      '1': { ...DEFAULT_COMFY_INSTANCES_SETTINGS['1'] },
+      '2': { ...DEFAULT_COMFY_INSTANCES_SETTINGS['2'] },
+    };
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    '1': normalizeSingleInstance(obj['1'], DEFAULT_COMFY_INSTANCES_SETTINGS['1']),
+    '2': normalizeSingleInstance(obj['2'], DEFAULT_COMFY_INSTANCES_SETTINGS['2']),
   };
 }
 

@@ -39,6 +39,7 @@ const MODEL_INPUTS: Array<{ classType: string; field: string; folder: string }> 
   { classType: 'VAELoader', field: 'vae_name', folder: 'models/vae' },
   { classType: 'CLIPVisionLoader', field: 'clip_name', folder: 'models/clip_vision' },
   { classType: 'UpscaleModelLoader', field: 'model_name', folder: 'models/upscale_models' },
+  { classType: 'LoraLoaderModelOnly', field: 'lora_name', folder: 'models/loras' },
   {
     classType: 'RIFE VFI',
     field: 'ckpt_name',
@@ -328,5 +329,22 @@ export async function runPreflight(
     return analyzePreflight(graphs, objectInfo);
   } catch {
     return null;
+  }
+}
+
+/**
+ * Fetches installed LoRA filenames from ComfyUI `GET /object_info/LoraLoaderModelOnly`.
+ * Returns an empty list if ComfyUI is unreachable or no LoRAs are present.
+ */
+export async function fetchAvailableLoras(
+  serverUrl: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string[]> {
+  try {
+    const info = await fetchObjectInfo(serverUrl, ['LoraLoaderModelOnly'], fetchImpl);
+    const options = extractComboOptions(info.LoraLoaderModelOnly?.input?.required?.lora_name);
+    return options ? [...options].sort((a, b) => a.localeCompare(b)) : [];
+  } catch {
+    return [];
   }
 }

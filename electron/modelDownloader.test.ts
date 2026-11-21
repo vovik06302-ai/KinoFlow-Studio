@@ -33,10 +33,13 @@ test('REQUIRED_MODELS includes official Wan 2.2 T2V/I2V FP8, UMT5-XXL FP8, Wan 2
     assert.ok(model.targetSubfolder.startsWith('models/'));
   }
 
+  assert.ok(filenames.includes('wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors'));
+  assert.ok(filenames.includes('wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors'));
+
   const coreModels = REQUIRED_MODELS.filter((m) => !m.optional);
   const optionalModels = REQUIRED_MODELS.filter((m) => m.optional);
   assert.equal(coreModels.length, 6);
-  assert.equal(optionalModels.length, 3);
+  assert.equal(optionalModels.length, 7);
 });
 
 test('evaluateModelFileStatus detects installed, size_mismatch, partial, missing, and tolerates minor metadata drift on large models', () => {

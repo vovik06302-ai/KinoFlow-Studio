@@ -8,15 +8,19 @@ import {
   FolderOpen,
   Layers,
   Loader2,
+  Music,
   RefreshCw,
   RotateCcw,
   Square,
   Trash2,
+  Wrench,
+  X,
 } from 'lucide-react';
 import {
   computeUpscaleTargetSize,
   formatSegmentLabel,
   getShootingStyleOption,
+  isWindowsFlushErrno22Error,
 } from '../services/comfyService';
 import type { PreflightReport } from '../services/preflightService';
 import {
@@ -24,13 +28,70 @@ import {
   triggerVideoDownload,
 } from '../utils/videoDownload';
 import { mergeVideoSegments } from '../utils/videoFrameUtils';
-import type { FilmMergeProgress } from '../types/film';
+import type { FilmMergeProgress, SelectedAudioTrack } from '../types/film';
 import type {
   GenerationHistoryItem,
   GenerationProgress,
 } from '../types/video';
 
+const WIN_FLUSH_FIX_FALLBACK_PY = `# KinoFlow Studio Windows [Errno 22] flush patch for ComfyUI
+# Place at: ComfyUI/custom_nodes/kinoflow_win_flush_fix/__init__.py
+import errno
+import sys
+
+def _patch():
+    def _wrap(stream):
+        if stream is None or getattr(stream, "_kinoflow_safe_flush", False):
+            return stream
+        class _Safe:
+            _kinoflow_safe_flush = True
+            def __init__(self, inner):
+                self._inner = inner
+            def write(self, data):
+                try:
+                    return self._inner.write(data)
+                except OSError as e:
+                    if getattr(e, "errno", None) == errno.EINVAL:
+                        return len(data) if hasattr(data, "__len__") else 0
+                    raise
+            def flush(self):
+                try:
+                    return self._inner.flush()
+                except OSError as e:
+                    if getattr(e, "errno", None) == errno.EINVAL:
+                        return None
+                    raise
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+        return _Safe(stream)
+    try:
+        import app.logger as _al
+        _cls = getattr(_al, "LogInterceptor", None)
+        if _cls is not None and not getattr(_cls, "_kinoflow_patched", False):
+            _of = _cls.flush
+            def _sf(self, *a, **kw):
+                try:
+                    return _of(self, *a, **kw)
+                except OSError as e:
+                    if getattr(e, "errno", None) == errno.EINVAL:
+                        return None
+                    raise
+            _cls.flush = _sf
+            _cls._kinoflow_patched = True
+    except Exception:
+        pass
+    for n in ("stdout", "stderr", "__stdout__", "__stderr__"):
+        s = getattr(sys, n, None)
+        if s is not None:
+            setattr(sys, n, _wrap(s))
+
+_patch()
+NODE_CLASS_MAPPINGS = {}
+NODE_DISPLAY_NAME_MAPPINGS = {}
+`;
+
 interface PreviewAndHistoryPanelProps {
+  comfyDir?: string;
   progress: GenerationProgress;
   generationError: string | null;
   preflightReport: PreflightReport | null;
@@ -56,6 +117,7 @@ interface PreviewAndHistoryPanelProps {
 }
 
 export function PreviewAndHistoryPanel({
+  comfyDir,
   progress,
   generationError,
   preflightReport,
@@ -84,7 +146,10 @@ export function PreviewAndHistoryPanel({
   const [mergeNotice, setMergeNotice] = useState<string | null>(null);
   const [mergeProgress, setMergeProgress] = useState<FilmMergeProgress | null>(null);
   const [savedFilmPath, setSavedFilmPath] = useState<string | null>(null);
+  const [selectedAudio, setSelectedAudio] = useState<SelectedAudioTrack | null>(null);
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
+  const [fixingFlush, setFixingFlush] = useState(false);
+  const [flushFixNotice, setFlushFixNotice] = useState<string | null>(null);
 
   const segments = activeVideo?.segments && activeVideo.segments.length > 0 ? activeVideo.segments : null;
   const activeSegment = segments
@@ -100,6 +165,58 @@ export function PreviewAndHistoryPanel({
     setSelectedSegmentIndex(0);
     setMergeError(null);
   }, [activeVideo?.id]);
+
+  useEffect(() => {
+    setFlushFixNotice(null);
+  }, [generationError]);
+
+  const handleSelectAudioTrack = async () => {
+    const filmBridge = window.kinoflowFilm;
+    if (!filmBridge?.selectAudio) return;
+    const picked = await filmBridge.selectAudio();
+    if (picked) {
+      setSelectedAudio(picked);
+      setMergeError(null);
+    }
+  };
+
+  const handleApplyFlushFix = async () => {
+    const launcher = window.kinoflowLauncher;
+    if (launcher?.restart) {
+      setFixingFlush(true);
+      setFlushFixNotice(null);
+      try {
+        const res = await launcher.restart(comfyDir);
+        if (res.ok) {
+          setFlushFixNotice(
+            res.restarted
+              ? 'Патч [Errno 22] установлен и ComfyUI перезапущен. Подождите 10–15 сек и повторите генерацию.'
+              : 'Патч [Errno 22] установлен в custom_nodes/kinoflow_win_flush_fix. Перезапустите ComfyUI и повторите генерацию.',
+          );
+          window.setTimeout(() => onCheckConnection(), 4500);
+        } else {
+          setFlushFixNotice(res.error || 'Не удалось применить патч автоматически.');
+        }
+      } finally {
+        setFixingFlush(false);
+      }
+      return;
+    }
+
+    // Browser fallback: download __init__.py custom node file directly.
+    const blob = new Blob([WIN_FLUSH_FIX_FALLBACK_PY], { type: 'text/x-python;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = '__init__.py';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+    setFlushFixNotice(
+      'Файл __init__.py скачан. Поместите его в ComfyUI/custom_nodes/kinoflow_win_flush_fix/__init__.py и перезапустите ComfyUI.',
+    );
+  };
 
   const handleDownload = async (url: string, filename: string, key: string) => {
     if (!url || downloadingKey === key) return;
@@ -140,8 +257,14 @@ export function PreviewAndHistoryPanel({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  const handleMergeAndDownload = async () => {
-    if (!segments || segments.length < 2) return;
+  const handleMergeAndDownload = async (singleClipUrl?: string) => {
+    const urls = singleClipUrl
+      ? [singleClipUrl]
+      : segments && segments.length >= 2
+        ? segments.map((s) => s.videoUrl)
+        : null;
+    if (!urls || urls.length === 0) return;
+
     setIsMerging(true);
     setMergeError(null);
     setMergeNotice(null);
@@ -150,21 +273,32 @@ export function PreviewAndHistoryPanel({
     try {
       const filmBridge = window.kinoflowFilm;
       if (filmBridge) {
-        // Desktop app: lossless-quality join with FFmpeg, duplicated stitch frames removed.
+        // Desktop app: lossless-quality join with FFmpeg, optional audio mux, duplicated stitch frames removed.
         const unsubscribe = filmBridge.onProgress(setMergeProgress);
         try {
+          const suggestedName = selectedAudio
+            ? `kinoflow_audio_${activeVideo?.durationSec ?? 5}s.mp4`
+            : `kinoflow_film_${activeVideo?.durationSec ?? 10}s.mp4`;
           const result = await filmBridge.mergeSegments(
-            segments.map((s) => s.videoUrl),
-            `kinoflow_film_${activeVideo?.durationSec ?? 10}s.mp4`,
+            urls,
+            suggestedName,
+            selectedAudio ? { audioPath: selectedAudio.path, audioVolume: 1.0 } : undefined,
           );
           if (result.ok && result.path) {
             setSavedFilmPath(result.path);
-            setMergeNotice(`Фильм сохранён: ${result.path}`);
+            setMergeNotice(
+              selectedAudio
+                ? `Видео с аудиодорожкой сохранено: ${result.path}`
+                : `Фильм сохранён: ${result.path}`,
+            );
             return;
           }
           if (result.code === 'CANCELLED') return;
           if (result.code !== 'FFMPEG_NOT_FOUND') {
             throw new Error(result.error ?? 'Не удалось склеить видеосегменты.');
+          }
+          if (urls.length < 2) {
+            throw new Error('Для наложения аудиодорожки требуется FFmpeg в настольном приложении.');
           }
           setMergeNotice(
             'FFmpeg не найден, использована встроенная склейка (в реальном времени, качество ниже). Установите FFmpeg для быстрой склейки без потерь.',
@@ -174,8 +308,9 @@ export function PreviewAndHistoryPanel({
         }
       }
 
+      if (urls.length < 2) return;
       const { blob, extension } = await mergeVideoSegments(
-        segments.map((s) => s.videoUrl),
+        urls,
         activeVideo?.fps ?? 16,
       );
       const url = URL.createObjectURL(blob);
@@ -440,49 +575,108 @@ export function PreviewAndHistoryPanel({
             )}
           </div>
 
-          {/* Segment Selector Strip (for chained 10-20s videos or extended scenes) */}
-          {activeVideo && !isGenerating && segments && segments.length > 1 && (
-            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#1E2330] bg-[#10141D] px-4 py-2.5">
-              <div className="flex flex-wrap items-center gap-1.5">
-                {segments.map((seg, idx) => (
-                  <button
-                    key={`${seg.promptId}-${seg.index}`}
-                    type="button"
-                    onClick={() => setSelectedSegmentIndex(idx)}
-                    className={`whitespace-nowrap rounded px-2.5 py-1 font-mono text-[11px] tabular-nums transition-colors ${
-                      selectedSegmentIndex === idx
-                        ? 'bg-[#252C3D] text-[#F8FAFC]'
-                        : 'text-[#94A3B8] hover:bg-[#191E2A] hover:text-[#E2E8F0]'
-                    }`}
-                  >
-                    Сегмент {seg.index} ({seg.startSec}–{seg.endSec}с)
-                  </button>
-                ))}
-              </div>
+          {/* Segment Selector Strip & Optional FFmpeg Audio Track Bar */}
+          {activeVideo &&
+            !isGenerating &&
+            ((segments && segments.length > 1) || Boolean(window.kinoflowFilm?.selectAudio)) && (
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#1E2330] bg-[#10141D] px-4 py-2.5">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {segments &&
+                    segments.length > 1 &&
+                    segments.map((seg, idx) => (
+                      <button
+                        key={`${seg.promptId}-${seg.index}`}
+                        type="button"
+                        onClick={() => setSelectedSegmentIndex(idx)}
+                        className={`whitespace-nowrap rounded px-2.5 py-1 font-mono text-[11px] tabular-nums transition-colors ${
+                          selectedSegmentIndex === idx
+                            ? 'bg-[#252C3D] text-[#F8FAFC]'
+                            : 'text-[#94A3B8] hover:bg-[#191E2A] hover:text-[#E2E8F0]'
+                        }`}
+                      >
+                        Сегмент {seg.index} ({seg.startSec}–{seg.endSec}с)
+                      </button>
+                    ))}
+                </div>
 
-              <button
-                type="button"
-                disabled={isMerging}
-                onClick={() => void handleMergeAndDownload()}
-                className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#2B3242] bg-[#1A1F2B] px-3 py-1.5 text-xs font-medium text-[#E2E8F0] transition-colors hover:bg-[#222838] disabled:opacity-50"
-              >
-                {isMerging ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                ) : (
-                  <Layers className="h-3.5 w-3.5" aria-hidden="true" />
-                )}
-                <span>
-                  {isMerging
-                    ? mergeProgress
-                      ? mergeProgress.phase === 'downloading'
-                        ? `Загрузка ${mergeProgress.index}/${mergeProgress.total}...`
-                        : 'Кодирование...'
-                      : 'Склейка...'
-                    : 'Склеить и скачать'}
-                </span>
-              </button>
-            </div>
-          )}
+                <div className="flex flex-wrap items-center gap-2">
+                  {window.kinoflowFilm?.selectAudio && (
+                    <div className="inline-flex items-center gap-1">
+                      <button
+                        type="button"
+                        disabled={isMerging}
+                        onClick={() => void handleSelectAudioTrack()}
+                        title="Выбрать MP3/WAV/M4A аудиодорожку для наложения через FFmpeg"
+                        className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
+                          selectedAudio
+                            ? 'border-[#E58E26]/60 bg-[#E58E26]/15 text-[#F6AD55]'
+                            : 'border-[#262C3A] bg-[#141821] text-[#CBD5E1] hover:border-[#3A4358] hover:text-white'
+                        }`}
+                      >
+                        <Music className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span className="max-w-[140px] truncate">
+                          {selectedAudio ? selectedAudio.name : 'Аудио (FFmpeg)'}
+                        </span>
+                      </button>
+                      {selectedAudio && (
+                        <button
+                          type="button"
+                          disabled={isMerging}
+                          onClick={() => setSelectedAudio(null)}
+                          aria-label="Убрать аудиодорожку"
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-[#262C3A] bg-[#141821] text-[#94A3B8] hover:text-[#F87171]"
+                        >
+                          <X className="h-3.5 w-3.5" aria-hidden="true" />
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {segments && segments.length > 1 ? (
+                    <button
+                      type="button"
+                      disabled={isMerging}
+                      onClick={() => void handleMergeAndDownload()}
+                      className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#2B3242] bg-[#1A1F2B] px-3 py-1.5 text-xs font-medium text-[#E2E8F0] transition-colors hover:bg-[#222838] disabled:opacity-50"
+                    >
+                      {isMerging ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                      ) : (
+                        <Layers className="h-3.5 w-3.5" aria-hidden="true" />
+                      )}
+                      <span>
+                        {isMerging
+                          ? mergeProgress
+                            ? mergeProgress.phase === 'downloading'
+                              ? `Загрузка ${mergeProgress.index}/${mergeProgress.total}...`
+                              : 'Кодирование...'
+                            : 'Склейка...'
+                          : selectedAudio
+                            ? 'Склеить с аудио'
+                            : 'Склеить и скачать'}
+                      </span>
+                    </button>
+                  ) : (
+                    selectedAudio &&
+                    currentVideoSrc && (
+                      <button
+                        type="button"
+                        disabled={isMerging}
+                        onClick={() => void handleMergeAndDownload(currentVideoSrc)}
+                        className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#E58E26]/60 bg-[#E58E26]/15 px-3 py-1.5 text-xs font-semibold text-[#F6AD55] transition-colors hover:bg-[#E58E26]/25 disabled:opacity-50"
+                      >
+                        {isMerging ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                        ) : (
+                          <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                        )}
+                        <span>{isMerging ? 'Кодирование...' : 'Экспорт с аудио'}</span>
+                      </button>
+                    )
+                  )}
+                </div>
+              </div>
+            )}
 
           {/* Extend Scene Bar + Active Video Metadata */}
           {activeVideo && !isGenerating && (
@@ -661,6 +855,32 @@ export function PreviewAndHistoryPanel({
                 {preflightReport ? 'ComfyUI не готов к запуску' : 'Не удалось выполнить генерацию'}
               </p>
               <p className="leading-relaxed text-[#FCA5A5]/90">{generationError}</p>
+              {isWindowsFlushErrno22Error(generationError) && (
+                <div className="space-y-1.5 pt-1.5" data-testid="win-flush-fix-callout">
+                  <button
+                    type="button"
+                    disabled={fixingFlush}
+                    onClick={() => void handleApplyFlushFix()}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-[#E58E26] bg-[#2A1D0B] px-3 py-1.5 text-xs font-semibold text-[#F5B461] transition-colors hover:bg-[#3A2810] disabled:opacity-50"
+                  >
+                    {fixingFlush ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Wrench className="h-3.5 w-3.5" aria-hidden="true" />
+                    )}
+                    <span>
+                      {fixingFlush
+                        ? 'Установка патча и перезапуск...'
+                        : window.kinoflowLauncher?.restart
+                          ? 'Исправить [Errno 22] и перезапустить ComfyUI'
+                          : 'Скачать патч [Errno 22] (__init__.py)'}
+                    </span>
+                  </button>
+                  {flushFixNotice && (
+                    <p className="text-[11px] leading-relaxed text-[#FDE68A]">{flushFixNotice}</p>
+                  )}
+                </div>
+              )}
               {preflightReport && (
                 <div className="space-y-2 pt-1" data-testid="preflight-report">
                   {preflightReport.missingNodes.length > 0 && (

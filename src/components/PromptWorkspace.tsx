@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronUp, Loader2, RotateCcw, Wand2 } from 'lucide-react';
+import { ChevronDown, ChevronUp, Languages, Loader2, RotateCcw, Wand2 } from 'lucide-react';
 import { LIGHTING_PRESETS } from '../../serverPromptHelper';
+import { containsCyrillic } from '../services/promptService';
 import { PROMPT_TEMPLATES, appendPromptTemplate } from '../services/promptTemplates';
 import { CAMERA_PRESETS } from '../services/storyboard';
 import type { CameraPresetId } from '../services/storyboard';
@@ -15,6 +16,7 @@ interface PromptWorkspaceProps {
   lightingPreset: string;
   enhanceSourceLabel?: string | null;
   isEnhancing: boolean;
+  isTranslating?: boolean;
   enhanceError: string | null;
   offlineMode?: boolean;
   hasLocalLlm?: boolean;
@@ -24,6 +26,7 @@ interface PromptWorkspaceProps {
   onCameraPresetChange: (camera: CameraPresetId) => void;
   onLightingPresetChange: (lightingCue: string) => void;
   onEnhancePrompt: () => void;
+  onTranslatePrompt?: () => void;
   onRevertEnhancedPrompt: () => void;
 }
 
@@ -36,6 +39,7 @@ export function PromptWorkspace({
   lightingPreset,
   enhanceSourceLabel,
   isEnhancing,
+  isTranslating = false,
   enhanceError,
   offlineMode = false,
   hasLocalLlm = false,
@@ -45,10 +49,12 @@ export function PromptWorkspace({
   onCameraPresetChange,
   onLightingPresetChange,
   onEnhancePrompt,
+  onTranslatePrompt,
   onRevertEnhancedPrompt,
 }: PromptWorkspaceProps) {
   const [showNegative, setShowNegative] = useState(false);
   const namedCharacters = characters.filter((c) => c.name.trim().length > 0);
+  const canTranslateRu = Boolean(onTranslatePrompt && hasLocalLlm && containsCyrillic(prompt));
 
   const enhanceHint = hasLocalLlm
     ? 'Улучшение промпта через локальную LLM (автономно)'
@@ -65,22 +71,38 @@ export function PromptWorkspace({
         >
           Описание сцены
         </label>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           {originalPromptBeforeEnhance !== null && (
             <button
               type="button"
               onClick={onRevertEnhancedPrompt}
-              disabled={disabled || isEnhancing}
+              disabled={disabled || isEnhancing || isTranslating}
               className="inline-flex items-center gap-1 whitespace-nowrap rounded-md px-2 py-1 text-xs font-medium text-[#94A3B8] transition-colors hover:bg-[#1A1F2B] hover:text-[#E2E8F0] focus-visible:outline-2 focus-visible:outline-[#E58E26] disabled:opacity-50"
             >
               <RotateCcw className="h-3 w-3" aria-hidden="true" />
-              <span>Вернуть исходный</span>
+              <span>Вернуть</span>
+            </button>
+          )}
+          {canTranslateRu && (
+            <button
+              type="button"
+              onClick={onTranslatePrompt}
+              disabled={disabled || isEnhancing || isTranslating}
+              title="Перевести русский промпт на английский через локальную LLM"
+              className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-[#2B3242] bg-[#1A1F2B] px-2.5 py-1.5 text-xs font-medium text-[#CBD5E1] transition-colors hover:border-[#3A4358] hover:text-white disabled:opacity-45"
+            >
+              {isTranslating ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+              ) : (
+                <Languages className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
+              <span>RU→EN</span>
             </button>
           )}
           <button
             type="button"
             onClick={onEnhancePrompt}
-            disabled={disabled || isEnhancing || !prompt.trim()}
+            disabled={disabled || isEnhancing || isTranslating || !prompt.trim()}
             className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-[#E58E26]/45 bg-[#E58E26]/12 px-3 py-1.5 text-xs font-medium text-[#F6AD55] transition-colors hover:bg-[#E58E26]/20 focus-visible:outline-2 focus-visible:outline-[#E58E26] disabled:cursor-not-allowed disabled:opacity-45"
           >
             {isEnhancing ? (

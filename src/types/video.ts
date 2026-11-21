@@ -65,9 +65,25 @@ export interface CharacterReference {
   uploadedFilename?: string;
 }
 
+export type SamplerName = 'uni_pc' | 'euler' | 'dpmpp_2m' | 'res_multistep';
+
+export type SchedulerName = 'simple' | 'beta' | 'normal' | 'sgm_uniform';
+
+export interface ComfyInstanceSettings {
+  gpuIndex: number;
+  port: number;
+}
+
+export interface ComfyInstancesSettings {
+  '1': ComfyInstanceSettings;
+  '2': ComfyInstanceSettings;
+}
+
 export interface GenerationSettings {
   serverUrl: string;
   comfyDir: string;
+  /** Per-instance GPU and port configuration for multi-GPU ComfyUI launcher. */
+  comfyInstances?: ComfyInstancesSettings;
   mode: GenerationMode;
   modelId: BaseModelId;
   durationSec: DurationChoice;
@@ -83,6 +99,23 @@ export interface GenerationSettings {
   rifeEnabled: boolean;
   rifeTargetFps: RifeTargetFps;
   shootingStyle: ShootingStyleId;
+  /** LightX2V 4–8 step distilled LoRA speedup mode (3–4x faster Wan 2.2 MoE). */
+  fastLightX2V?: boolean;
+  /** Fine sampler controls (Wan 2.2 CFG, Flow Shift, sampler, scheduler). */
+  cfg?: number;
+  cfgLow?: number;
+  flowShift?: number;
+  samplerName?: SamplerName;
+  scheduler?: SchedulerName;
+  /** Optional custom style/motion LoRA from ComfyUI models/loras. */
+  customLoraName?: string;
+  customLoraStrength?: number;
+  /** Center-crop I2V start/end frames to exact target aspect ratio before encoding. */
+  autoCropStartFrame?: boolean;
+  /** Color-drift mitigation across chained 10–30s segments (gentle CFG/shift decay + high-bitrate intermediate + negative guard). */
+  preventColorDrift?: boolean;
+  /** Automatically translate Cyrillic prompts to English via configured local LLM before generation. */
+  autoTranslateRuPrompt?: boolean;
   offlineMode?: boolean;
   localLlmUrl?: string;
   localLlmModel?: string;

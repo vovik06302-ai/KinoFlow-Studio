@@ -5,6 +5,7 @@ import {
   analyzePreflight,
   buildModelResolutionKey,
   extractComboOptions,
+  fetchAvailableLoras,
   formatPreflightReport,
   runPreflight,
 } from './preflightService';
@@ -264,6 +265,49 @@ test('analyzePreflight checks RIFE VFI ckpt_name when frame interpolation is ena
   );
   assert.equal(okRife.ok, true);
 });
+
+test('analyzePreflight validates LoraLoaderModelOnly files and fetchAvailableLoras parses options', async () => {
+  const turboSettings: GenerationSettings = {
+    ...settings,
+    durationSec: 5,
+    fastLightX2V: true,
+    steps: 6,
+  };
+  const graphs = buildPreflightGraphs({
+    settings: turboSettings,
+    hasStartFrame: false,
+    isContinuation: false,
+  });
+
+  const missingReport = analyzePreflight(
+    graphs,
+    fullObjectInfo({
+      LoraLoaderModelOnly: {
+        input: { required: { lora_name: combo('other.safetensors') } },
+      },
+    }),
+  );
+  assert.equal(missingReport.ok, false);
+  assert.ok(
+    missingReport.missingFiles.some(
+      (f) => f.folder === 'models/loras' && f.catalogModelId === 'wan22-t2v-lightx2v-high',
+    ),
+  );
+
+  const mockFetch = (async () =>
+    new Response(
+      JSON.stringify({
+        LoraLoaderModelOnly: {
+          input: { required: { lora_name: combo('style_a.safetensors', 'style_b.safetensors') } },
+        },
+      }),
+      { status: 200 },
+    )) as unknown as typeof fetch;
+
+  const loras = await fetchAvailableLoras('http://127.0.0.1:8188', mockFetch);
+  assert.deepEqual(loras, ['style_a.safetensors', 'style_b.safetensors']);
+});
+
 
 
 

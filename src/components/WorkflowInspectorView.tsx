@@ -14,6 +14,7 @@ interface WorkflowInspectorViewProps {
   negativePrompt: string;
   characters: CharacterReference[];
   startFrame: StartFrameReference | null;
+  endFrame?: StartFrameReference | null;
 }
 
 export function WorkflowInspectorView({
@@ -22,6 +23,7 @@ export function WorkflowInspectorView({
   negativePrompt,
   characters,
   startFrame,
+  endFrame = null,
 }: WorkflowInspectorViewProps) {
   const [workflowKind, setWorkflowKind] = useState<GenerationMode>(settings.mode);
   const [mode, setMode] = useState<'rendered' | 'template'>('rendered');
@@ -48,6 +50,8 @@ export function WorkflowInspectorView({
             ? `kinoflow_start_${startFrame.file.name}`
             : 'kinoflow_chain_last_frame.png'
           : undefined,
+      endFrameFilename:
+        workflowKind === 'i2v' && endFrame ? `kinoflow_end_${endFrame.file.name}` : undefined,
       characters: characters.map((c, idx) => ({
         name: c.name.trim() || `Персонаж ${idx + 1}`,
         weight: c.weight,
@@ -56,7 +60,7 @@ export function WorkflowInspectorView({
     });
 
     return JSON.stringify(built, null, 2);
-  }, [mode, workflowKind, settings, prompt, negativePrompt, characters, startFrame]);
+  }, [mode, workflowKind, settings, prompt, negativePrompt, characters, startFrame, endFrame]);
 
   const activeFileName = workflowKind === 'i2v' ? 'workflow_i2v.json' : 'workflow_t2v.json';
 
