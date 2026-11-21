@@ -1,7 +1,7 @@
 {
   "name": "kinoflow-studio",
   "private": true,
-  "version": "1.2.71",
+  "version": "1.2.72",
   "description": "KinoFlow Studio desktop and web client for local ComfyUI video generation",
   "type": "module",
   "main": "electron/main.js",
@@ -15,7 +15,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist build-renderer server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test electron/*.test.ts src/services/*.test.ts"
+    "test": "tsx --test electron/*.test.ts src/services/*.test.ts src/utils/*.test.ts"
   },
   "dependencies": {
     "@google/genai": "^3.6.1",
@@ -63,6 +63,15 @@
     ],
     "asarUnpack": [
       "assets/icon.ico"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": ".",
+        "filter": [
+          "ffmpeg.exe"
+        ]
+      }
     ],
     "win": {
       "target": [

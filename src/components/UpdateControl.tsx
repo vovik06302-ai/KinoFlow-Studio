@@ -10,6 +10,8 @@ type Phase = 'idle' | 'checking' | 'available' | 'downloading' | 'installing' | 
 interface UpdateControlProps {
   /** Disables updating while a video is being generated (the app restarts to install). */
   busy?: boolean;
+  /** When enabled, skips automatic background checks against GitHub API. */
+  offlineMode?: boolean;
 }
 
 function formatMegabytes(bytes: number | null | undefined): string {
@@ -17,7 +19,7 @@ function formatMegabytes(bytes: number | null | undefined): string {
   return `${(bytes / (1024 * 1024)).toFixed(0)} МБ`;
 }
 
-export function UpdateControl({ busy = false }: UpdateControlProps) {
+export function UpdateControl({ busy = false, offlineMode = false }: UpdateControlProps) {
   const bridge = typeof window !== 'undefined' ? window.kinoflowUpdater : undefined;
   const [version, setVersion] = useState<string>(
     typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '',
@@ -60,8 +62,12 @@ export function UpdateControl({ busy = false }: UpdateControlProps) {
       .then((value) => setVersion(value))
       .catch(() => undefined);
 
-    const firstCheck = window.setTimeout(() => void runCheck(), FIRST_CHECK_DELAY_MS);
-    const interval = window.setInterval(() => void runCheck(), RECHECK_INTERVAL_MS);
+    const firstCheck = offlineMode
+      ? null
+      : window.setTimeout(() => void runCheck(), FIRST_CHECK_DELAY_MS);
+    const interval = offlineMode
+      ? null
+      : window.setInterval(() => void runCheck(), RECHECK_INTERVAL_MS);
     const unsubscribe = bridge.onProgress((event: UpdateProgressEvent) => {
       if (event.phase === 'downloading') {
         setPhase('downloading');
@@ -80,11 +86,11 @@ export function UpdateControl({ busy = false }: UpdateControlProps) {
     });
 
     return () => {
-      window.clearTimeout(firstCheck);
-      window.clearInterval(interval);
+      if (firstCheck !== null) window.clearTimeout(firstCheck);
+      if (interval !== null) window.clearInterval(interval);
       unsubscribe();
     };
-  }, [bridge, runCheck]);
+  }, [bridge, runCheck, offlineMode]);
 
   const handleUpdate = useCallback(async () => {
     if (!bridge || busy) return;

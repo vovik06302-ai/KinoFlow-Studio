@@ -3,6 +3,11 @@ export declare function buildComfyLaunchEnv(
   baseEnv?: Record<string, string | undefined>,
 ): Record<string, string | undefined>;
 export declare function findLaunchScript(comfyDir: string, fsImpl?: unknown): string | null;
+export declare function detectComfyDirectory(options?: {
+  env?: Record<string, string | undefined>;
+  homedir?: string;
+  fsImpl?: unknown;
+}): string | null;
 
 export type LauncherEvent =
   | { type: 'log'; line: string }

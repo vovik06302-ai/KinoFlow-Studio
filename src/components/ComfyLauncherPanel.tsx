@@ -110,7 +110,7 @@ export function ComfyLauncherPanel({
               title={
                 connectionStatus === 'online'
                   ? 'ComfyUI уже отвечает по указанному адресу'
-                  : 'Запустит run_nvidia_gpu.bat из папки ComfyUI'
+                  : 'Запустит run_nvidia_gpu.bat или ComfyUI.exe из папки ComfyUI'
               }
               className="inline-flex items-center gap-1.5 rounded-md border border-[#E58E26] bg-[#2A1D0B] px-3 py-1.5 text-xs font-semibold text-[#F5B461] hover:bg-[#3A2810] disabled:cursor-not-allowed disabled:opacity-50"
             >

@@ -7,6 +7,7 @@ import {
   AUTO_T2V_MODEL_FILE,
   DEFAULT_NEGATIVE_PROMPT,
   GenerationParamsValidationError,
+  applyLightingToPrompt,
   applyShootingStyleToPrompt,
   buildRootUploadFilename,
   buildWorkflowFromTemplate,
@@ -22,6 +23,7 @@ import {
   formatSegmentLabel,
   getViewUrl,
   isHistoryPromptFinished,
+  isLoopbackHttpUrl,
   normalizeBaseUrl,
   parseComfyWsEvent,
   planGenerationSegments,
@@ -245,7 +247,7 @@ test('buildWorkflowFromTemplate configures Wan 2.2 TI2V-5B with Wan22ImageToVide
   });
 
   assert.equal(i2vGraph['1'].class_type, 'UNETLoader');
-  assert.equal(i2vGraph['1'].inputs.unet_name, 'wan2.2_ti2v_5B_fp8_e4m3fn.safetensors');
+  assert.equal(i2vGraph['1'].inputs.unet_name, 'wan2.2_ti2v_5B_fp16.safetensors');
   assert.equal(i2vGraph['4'].inputs.vae_name, 'wan2.2_vae.safetensors');
   assert.equal(i2vGraph['2'], undefined);
   assert.equal(i2vGraph['102'], undefined);
@@ -441,7 +443,13 @@ test('computeOutputFps keeps playback speed: RIFE doubles the frame rate', () =>
   assert.ok(Math.abs(161 / computeOutputFps(16, true) - 81 / 16) < 0.05);
 });
 
-test('classifyConnectionError distinguishes Electron ECONNREFUSED, HTTPS Mixed Content, timeouts, and browser CORS', () => {
+test('classifyConnectionError distinguishes Electron ECONNREFUSED, HTTPS loopback CORS/PNA, non-loopback Mixed Content, timeouts, and local HTTP CORS', () => {
+  assert.equal(isLoopbackHttpUrl('http://127.0.0.1:8188'), true);
+  assert.equal(isLoopbackHttpUrl('http://localhost:8188'), true);
+  assert.equal(isLoopbackHttpUrl('http://[::1]:8188'), true);
+  assert.equal(isLoopbackHttpUrl('http://192.168.1.25:8188'), false);
+  assert.equal(isLoopbackHttpUrl('https://127.0.0.1:8188'), false);
+
   const electronRefused = classifyConnectionError({
     serverUrl: 'http://127.0.0.1:8188',
     isElectron: true,
@@ -450,13 +458,22 @@ test('classifyConnectionError distinguishes Electron ECONNREFUSED, HTTPS Mixed C
   assert.match(electronRefused, /порт закрыт/i);
   assert.match(electronRefused, /8188 \/ 8000/);
 
-  const httpsMixed = classifyConnectionError({
+  const httpsLoopback = classifyConnectionError({
     serverUrl: 'http://127.0.0.1:8188',
     isElectron: false,
     pageProtocol: 'https:',
   });
-  assert.match(httpsMixed, /Mixed Content/i);
-  assert.match(httpsMixed, /\.exe/);
+  assert.match(httpsLoopback, /--enable-cors-header/);
+  assert.match(httpsLoopback, /\.exe/);
+  assert.ok(!httpsLoopback.includes('Mixed Content'));
+
+  const httpsNonLoopbackMixed = classifyConnectionError({
+    serverUrl: 'http://192.168.1.50:8188',
+    isElectron: false,
+    pageProtocol: 'https:',
+  });
+  assert.match(httpsNonLoopbackMixed, /Mixed Content/i);
+  assert.match(httpsNonLoopbackMixed, /\.exe/);
 
   const timeoutMsg = classifyConnectionError({
     serverUrl: 'http://127.0.0.1:8188',
@@ -607,12 +624,20 @@ test('extractExecutionErrorFromHistory and parseComfyWsEvent surface ComfyUI nod
   assert.equal(wsInterrupt.type, 'execution_interrupted');
 });
 
-test('applyShootingStyleToPrompt injects style cue on direct generation and skips when already enhanced', () => {
+test('applyShootingStyleToPrompt and applyLightingToPrompt inject cues on direct generation without duplicates', () => {
   const styled = applyShootingStyleToPrompt('A cyclist rides in the rain', 'night-neon', false);
   assert.match(styled, /A cyclist rides in the rain\. Low-light night cinematography/);
 
+  const lit = applyLightingToPrompt(styled, 'Warm golden hour sunlight with long shadows', false);
+  assert.match(lit, /\. Warm golden hour sunlight with long shadows$/);
+  assert.equal(
+    applyLightingToPrompt(lit, 'Warm golden hour sunlight with long shadows', false),
+    lit,
+  );
+
   const enhanced = applyShootingStyleToPrompt('Already enhanced prompt', 'night-neon', true);
   assert.equal(enhanced, 'Already enhanced prompt');
+  assert.equal(applyLightingToPrompt(enhanced, 'Golden hour', true), enhanced);
 });
 
 test('formatGenerationErrorMessage preserves ComfyUI errors without bogus CORS suffixes and classifies network errors', () => {
@@ -775,6 +800,35 @@ test('runComfyGeneration rejects invalid steps/frames before making any network 
     },
   );
 });
+
+test('runComfyGeneration blocks non-loopback HTTP on HTTPS pages but allows loopback 127.0.0.1 to attempt fetch', async () => {
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
+  (globalThis as unknown as { window: unknown }).window = {
+    location: { protocol: 'https:' },
+  };
+  try {
+    const controller = new AbortController();
+    await assert.rejects(
+      () =>
+        runComfyGeneration({
+          settings: { ...baseSettings, serverUrl: 'http://192.168.1.50:8188' },
+          positivePrompt: 'Cinema shot',
+          negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+          characters: [],
+          signal: controller.signal,
+          onProgress: () => {},
+        }),
+      /Mixed Content/i,
+    );
+  } finally {
+    if (originalWindow === undefined) {
+      delete (globalThis as unknown as { window?: unknown }).window;
+    } else {
+      (globalThis as unknown as { window: unknown }).window = originalWindow;
+    }
+  }
+});
+
 
 
 

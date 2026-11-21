@@ -10,8 +10,14 @@ import {
   performComfyRequest,
   probeLocalComfyUrls,
 } from './comfyBridge.js';
-import { ComfyLauncher, findLaunchScript } from './comfyLauncher.js';
-import { findFfmpeg, isHttpUrl, mergeSegments } from './filmMerger.js';
+import { ComfyLauncher, detectComfyDirectory, findLaunchScript } from './comfyLauncher.js';
+import {
+  archiveVideoClip,
+  extractLastFrameWithFfmpeg,
+  findFfmpeg,
+  isHttpUrl,
+  mergeSegments,
+} from './filmMerger.js';
 import {
   appendStartupLog,
   isLocalComfyHttpUrl,
@@ -69,8 +75,12 @@ function isPortOpen(port, host = '127.0.0.1', timeoutMs = 1500) {
 
 async function autoStartComfy() {
   try {
-    const comfyDir = readSavedComfyDir();
-    if (!comfyDir) return; // папка ещё не выбрана — запуск вручную один раз сохранит её
+    let comfyDir = readSavedComfyDir();
+    if (!comfyDir) {
+      comfyDir = detectComfyDirectory() ?? '';
+      if (comfyDir) saveComfyDir(comfyDir);
+    }
+    if (!comfyDir) return;
     const portStates = await Promise.all(
       DEFAULT_COMFY_PROBE_PORTS.map((port) => isPortOpen(port)),
     );
@@ -270,6 +280,16 @@ function registerLauncherIpc() {
 
   ipcMain.handle('comfy:launcher-state', async () => comfyLauncher.getState());
 
+  ipcMain.handle('comfy:launcher-detect', async () => {
+    const saved = readSavedComfyDir();
+    if (saved && fs.existsSync(saved)) {
+      return { comfyDir: saved };
+    }
+    const detected = detectComfyDirectory();
+    if (detected) saveComfyDir(detected);
+    return { comfyDir: detected };
+  });
+
   ipcMain.handle('comfy:launcher-start', async (_event, comfyDir) => {
     saveComfyDir(comfyDir);
     const scriptPath = findLaunchScript(typeof comfyDir === 'string' ? comfyDir : '');
@@ -294,7 +314,7 @@ function registerFilmIpc() {
 
   ipcMain.handle('film:merge', async (event, payload) => {
     const segmentUrls = Array.isArray(payload?.segmentUrls) ? payload.segmentUrls : [];
-    if (segmentUrls.length === 0 || segmentUrls.length > 24 || !segmentUrls.every(isHttpUrl)) {
+    if (segmentUrls.length === 0 || segmentUrls.length > 200 || !segmentUrls.every(isHttpUrl)) {
       return { ok: false, error: 'Некорректный список сегментов для склейки.' };
     }
 
@@ -333,6 +353,46 @@ function registerFilmIpc() {
         },
       });
       return { ok: true, path: filePath };
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) };
+    }
+  });
+
+  ipcMain.handle('film:extract-last-frame', async (_event, payload) => {
+    const videoUrl = typeof payload?.videoUrl === 'string' ? payload.videoUrl : '';
+    if (!isHttpUrl(videoUrl)) {
+      return { ok: false, error: 'Некорректный URL видео.' };
+    }
+    const ffmpegPath = await findFfmpeg();
+    if (!ffmpegPath) {
+      return { ok: false, code: 'FFMPEG_NOT_FOUND', error: 'FFmpeg не найден.' };
+    }
+    try {
+      const { pngBase64 } = await extractLastFrameWithFfmpeg({
+        videoUrl,
+        ffmpegPath,
+        tempRoot: app.getPath('temp'),
+      });
+      return { ok: true, pngBase64 };
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) };
+    }
+  });
+
+  ipcMain.handle('film:archive-clip', async (_event, payload) => {
+    const videoUrl = typeof payload?.videoUrl === 'string' ? payload.videoUrl : '';
+    const filename = typeof payload?.filename === 'string' ? payload.filename : undefined;
+    if (!isHttpUrl(videoUrl)) {
+      return { ok: false, error: 'Некорректный URL видео.' };
+    }
+    try {
+      const archiveDir = path.join(app.getPath('videos'), 'KinoFlow Studio');
+      const { localPath } = await archiveVideoClip({
+        videoUrl,
+        archiveDir,
+        filename,
+      });
+      return { ok: true, localPath };
     } catch (error) {
       return { ok: false, error: String(error?.message ?? error) };
     }

@@ -39,6 +39,11 @@ const MODEL_INPUTS: Array<{ classType: string; field: string; folder: string }> 
   { classType: 'VAELoader', field: 'vae_name', folder: 'models/vae' },
   { classType: 'CLIPVisionLoader', field: 'clip_name', folder: 'models/clip_vision' },
   { classType: 'UpscaleModelLoader', field: 'model_name', folder: 'models/upscale_models' },
+  {
+    classType: 'RIFE VFI',
+    field: 'ckpt_name',
+    folder: 'custom_nodes/ComfyUI-Frame-Interpolation/ckpts/rife',
+  },
 ];
 
 export interface MissingNode {

@@ -285,8 +285,8 @@ export function SettingsPanel({
 
         {segmentCount > 1 && (
           <p className="text-[11px] leading-relaxed text-[#94A3B8]">
-            Цепочка из {segmentCount} сегментов по 5 сек: в каждый новый отрезок передаются последний
-            кадр и исходные фото персонажей с фиксацией веса 0.75–0.85.
+            Цепочка из {segmentCount} сегментов по 5 сек: последний кадр каждого отрезка передаётся
+            в следующий сегмент (I2V), а каждый готовый сегмент сохраняется автоматически.
           </p>
         )}
       </div>
@@ -342,7 +342,7 @@ export function SettingsPanel({
               onChange={(e) => {
                 const val = Number(e.target.value);
                 if (!Number.isNaN(val)) {
-                  onChange({ steps: Math.max(4, Math.min(100, val)) });
+                  onChange({ steps: Math.max(4, Math.min(100, Math.round(val))) });
                 }
               }}
               className="w-16 rounded-md border border-[#262C3A] bg-[#141821] px-2 py-1.5 text-right font-mono text-xs tabular-nums text-[#F1F5F9] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
@@ -522,27 +522,87 @@ export function SettingsPanel({
         </button>
 
         {showAdvanced && (
-          <div id="advanced-settings-panel" className="mt-3 space-y-2">
-            <label
-              htmlFor="base-model-select"
-              className="block text-xs font-medium text-[#94A3B8]"
-            >
-              Выбор видеомодели
-            </label>
-            <select
-              id="base-model-select"
-              value={settings.modelId}
-              disabled={disabled}
-              onChange={handleModelChange}
-              className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-3 py-2 text-xs font-medium text-[#F1F5F9] transition-colors focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
-            >
-              {VIDEO_MODELS.map((model) => (
-                <option key={model.id} value={model.id} className="bg-[#141821] text-[#F1F5F9]">
-                  {model.label}
-                </option>
-              ))}
-            </select>
-            <p className="text-[11px] leading-relaxed text-[#64748B]">{activeModel.vramHint}</p>
+          <div id="advanced-settings-panel" className="mt-3 space-y-4">
+            <div className="space-y-2">
+              <label
+                htmlFor="base-model-select"
+                className="block text-xs font-medium text-[#94A3B8]"
+              >
+                Выбор видеомодели
+              </label>
+              <select
+                id="base-model-select"
+                value={settings.modelId}
+                disabled={disabled}
+                onChange={handleModelChange}
+                className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-3 py-2 text-xs font-medium text-[#F1F5F9] transition-colors focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
+              >
+                {VIDEO_MODELS.map((model) => (
+                  <option key={model.id} value={model.id} className="bg-[#141821] text-[#F1F5F9]">
+                    {model.label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] leading-relaxed text-[#64748B]">{activeModel.vramHint}</p>
+            </div>
+
+            <div className="space-y-2.5 border-t border-[#1E2330] pt-3.5">
+              <label
+                htmlFor="offline-mode-toggle"
+                className="flex cursor-pointer items-start justify-between gap-3 rounded-md border border-[#222734] bg-[#121620] px-3 py-2.5 transition-colors hover:border-[#2F374A]"
+              >
+                <div className="min-w-0">
+                  <span className="block text-xs font-medium text-[#E2E8F0]">
+                    Автономный режим (без интернета)
+                  </span>
+                  <span className="mt-0.5 block text-[11px] text-[#64748B]">
+                    Отключает автопроверку обновлений GitHub и облачный Gemini; промпт улучшается
+                    локально
+                  </span>
+                </div>
+                <input
+                  id="offline-mode-toggle"
+                  type="checkbox"
+                  checked={Boolean(settings.offlineMode)}
+                  disabled={disabled}
+                  onChange={(e) => onChange({ offlineMode: e.target.checked })}
+                  className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer rounded border-[#3A4358] bg-[#0D1017] accent-[#E58E26]"
+                />
+              </label>
+
+              <div className="space-y-2 rounded-md border border-[#222734] bg-[#121620] p-3">
+                <span className="block text-xs font-medium text-[#E2E8F0]">
+                  Локальная LLM для промптов (опционально)
+                </span>
+                <p className="text-[11px] leading-relaxed text-[#64748B]">
+                  Укажите адрес локального Ollama (<span className="font-mono">http://127.0.0.1:11434</span>)
+                  или LM Studio (<span className="font-mono">http://127.0.0.1:1234</span>) для
+                  перевода и обогащения промптов без интернета.
+                </p>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <input
+                    id="local-llm-url"
+                    type="url"
+                    value={settings.localLlmUrl ?? ''}
+                    disabled={disabled}
+                    onChange={(e) => onChange({ localLlmUrl: e.target.value })}
+                    placeholder="http://127.0.0.1:11434"
+                    aria-label="Адрес локальной LLM"
+                    className="rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 font-mono text-xs text-[#F1F5F9] placeholder-[#475569] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
+                  />
+                  <input
+                    id="local-llm-model"
+                    type="text"
+                    value={settings.localLlmModel ?? ''}
+                    disabled={disabled}
+                    onChange={(e) => onChange({ localLlmModel: e.target.value })}
+                    placeholder="qwen2.5:7b"
+                    aria-label="Модель локальной LLM"
+                    className="rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 font-mono text-xs text-[#F1F5F9] placeholder-[#475569] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
+                  />
+                </div>
+              </div>
+            </div>
           </div>
         )}
       </div>

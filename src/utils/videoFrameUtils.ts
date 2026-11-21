@@ -148,6 +148,31 @@ export async function extractLastFrameFromVideo(
   if (typeof source === 'string') {
     let resolvedUrl = source;
     if (!source.startsWith('blob:') && !source.startsWith('data:')) {
+      // Fast, frame-accurate native FFmpeg extraction in Electron desktop app
+      const filmBridge =
+        typeof window !== 'undefined' ? window.kinoflowFilm : undefined;
+      if (filmBridge?.extractLastFrame && /^https?:\/\//i.test(source)) {
+        try {
+          const nativeRes = await filmBridge.extractLastFrame(source);
+          if (nativeRes.ok && nativeRes.pngBase64) {
+            const pngBlob = base64ToBlob(nativeRes.pngBase64, 'image/png');
+            const file = new File([pngBlob], filename, { type: 'image/png' });
+            const previewUrl = URL.createObjectURL(file);
+            // Measure actual PNG dimensions without decoding the full MP4
+            const dims = await new Promise<{ width: number; height: number }>((resolve) => {
+              const img = new Image();
+              img.onload = () =>
+                resolve({ width: img.naturalWidth || 832, height: img.naturalHeight || 480 });
+              img.onerror = () => resolve({ width: 832, height: 480 });
+              img.src = previewUrl;
+            });
+            return { file, previewUrl, width: dims.width, height: dims.height };
+          }
+        } catch {
+          // Fall back cleanly to <video> + <canvas>
+        }
+      }
+
       const electronBridge =
         typeof window !== 'undefined'
           ? (window as unknown as { kinoflowComfy?: ElectronVideoBridge }).kinoflowComfy

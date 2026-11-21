@@ -112,6 +112,24 @@ export function applyShootingStyleToPrompt(
   return `${trimmed}${separator}${style.promptCue}`;
 }
 
+/**
+ * Applies an optional lighting preset cue to a direct prompt without duplicating it.
+ */
+export function applyLightingToPrompt(
+  prompt: string,
+  lightingCue?: string,
+  alreadyEnhanced: boolean = false,
+): string {
+  const trimmed = prompt.trim();
+  const cue = (lightingCue ?? '').trim();
+  if (!trimmed || !cue || alreadyEnhanced) return trimmed;
+  if (trimmed.toLowerCase().includes(cue.slice(0, 20).toLowerCase())) {
+    return trimmed;
+  }
+  const separator = /[.!?]$/.test(trimmed) ? ' ' : '. ';
+  return `${trimmed}${separator}${cue}`;
+}
+
 export const AUTO_T2V_MODEL_FILE = 'wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors';
 export const AUTO_T2V_LOW_MODEL_FILE = 'wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors';
 export const AUTO_I2V_MODEL_FILE = 'wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors';
@@ -169,19 +187,19 @@ export const VIDEO_MODELS: VideoModelOption[] = [
   },
   {
     id: 'wan22-ti2v-5b-fp8',
-    label: 'Wan 2.2 TI2V-5B (Dense · FP8)',
-    shortLabel: 'Wan 2.2 5B FP8',
+    label: 'Wan 2.2 TI2V-5B (Dense · Быстрая)',
+    shortLabel: 'Wan 2.2 5B',
     architecture: 'wan22-dense',
-    highNoiseFile: 'wan2.2_ti2v_5B_fp8_e4m3fn.safetensors',
-    lowNoiseFile: 'wan2.2_ti2v_5B_fp8_e4m3fn.safetensors',
-    i2vHighNoiseFile: 'wan2.2_ti2v_5B_fp8_e4m3fn.safetensors',
-    i2vLowNoiseFile: 'wan2.2_ti2v_5B_fp8_e4m3fn.safetensors',
+    highNoiseFile: 'wan2.2_ti2v_5B_fp16.safetensors',
+    lowNoiseFile: 'wan2.2_ti2v_5B_fp16.safetensors',
+    i2vHighNoiseFile: 'wan2.2_ti2v_5B_fp16.safetensors',
+    i2vLowNoiseFile: 'wan2.2_ti2v_5B_fp16.safetensors',
     textEncoderFile: 'umt5_xxl_fp8_e4m3fn_scaled.safetensors',
     textEncoderType: 'wan',
     vaeFile: 'wan2.2_vae.safetensors',
     defaultFps: 24,
     defaultSteps: 24,
-    vramHint: '~5.6 ГБ VRAM · T2V и I2V в одной модели',
+    vramHint: '~5.6 ГБ VRAM · T2V и I2V в одной модели (грузится в FP8 на лету)',
   },
 ];
 
@@ -1140,8 +1158,23 @@ function buildOnlineConnectionInfo(
 }
 
 /**
+ * Returns true if the URL targets loopback (`127.0.0.1`, `localhost`, `[::1]`).
+ * Under W3C Mixed Content Level 2, loopback HTTP is exempt from Mixed Content blocking in Chromium/Firefox.
+ */
+export function isLoopbackHttpUrl(urlString: string): boolean {
+  try {
+    const parsed = new URL(normalizeBaseUrl(urlString));
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    return parsed.protocol === 'http:' && (host === '127.0.0.1' || host === 'localhost' || host === '::1');
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Produces an accurate, actionable Russian diagnostic message for failed ComfyUI connections,
- * distinguishing HTTPS Mixed Content blocks, closed ports (ECONNREFUSED), timeouts, and CORS.
+ * distinguishing HTTPS Mixed Content blocks (non-loopback HTTP), loopback CORS/PNA issues,
+ * closed ports (ECONNREFUSED), timeouts, and browser CORS.
  */
 export function classifyConnectionError(params: {
   serverUrl: string;
@@ -1170,7 +1203,10 @@ export function classifyConnectionError(params: {
   const isHttpsPage = params.pageProtocol === 'https:';
   const isHttpTarget = /^http:\/\//i.test(base);
   if (isHttpsPage && isHttpTarget) {
-    return `Браузер блокирует запросы с HTTPS-страницы на локальный ${base} (Mixed Content). Откройте KinoFlow Studio в Windows-приложении (.exe) или локально по http://localhost:3000.`;
+    if (isLoopbackHttpUrl(base)) {
+      return `Не удалось подключиться к локальному ${base} с HTTPS-страницы. Проверьте: 1) ComfyUI запущен с флагом --enable-cors-header "*"; 2) в браузере разрешён доступ к локальной сети для этого сайта; либо используйте автономное Windows-приложение (.exe) / http://localhost:3000.`;
+    }
+    return `Браузер блокирует запросы с HTTPS-страницы на сетевой адрес ${base} (Mixed Content). Используйте HTTPS-адрес ComfyUI, локальный 127.0.0.1 или откройте KinoFlow Studio в Windows-приложении (.exe).`;
   }
 
   return `Не удалось подключиться к ${base}. Проверьте, что ComfyUI запущен (порт 8188 для Portable или 8000 для Desktop) с флагом --enable-cors-header "*".`;
@@ -1965,8 +2001,12 @@ async function executeSingleComfyWorkflow(
 
     signal.addEventListener('abort', onAbort);
 
+    let consecutivePollErrors = 0;
+    const MAX_CONSECUTIVE_POLL_ERRORS = 6;
+
     if (ws && wsConnected) {
       ws.onmessage = (event) => {
+        consecutivePollErrors = 0;
         if (typeof event.data !== 'string') return;
         const parsed = parseComfyWsEvent(event.data, promptId);
 
@@ -2016,6 +2056,7 @@ async function executeSingleComfyWorkflow(
       if (settled) return;
       try {
         const history = await getHistory(serverUrl, promptId);
+        consecutivePollErrors = 0;
         if (history[promptId]) {
           const execError = extractExecutionErrorFromHistory(history, promptId);
           if (execError) {
@@ -2045,7 +2086,14 @@ async function executeSingleComfyWorkflow(
           });
         }
       } catch {
-        // Retry on next poll interval
+        consecutivePollErrors += 1;
+        if (!wsConnected && consecutivePollErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+          fail(
+            new Error(
+              'Соединение с ComfyUI потеряно во время генерации. Возможно, сервер ComfyUI аварийно завершился (нехватка VRAM или ошибка драйвера) — проверьте журнал ComfyUI.',
+            ),
+          );
+        }
       }
     }, 2200);
   });
@@ -2067,6 +2115,8 @@ export interface RunGenerationOptions {
   fallbackCharacterAnchors?: WorkflowBuildCharacter[];
   signal: AbortSignal;
   onProgress: (progress: GenerationProgress) => void;
+  /** Called right after each 5s segment completes so UI can checkpoint partial multi-segment renders. */
+  onSegmentCompleted?: (segment: GeneratedSegment, allCompleted: GeneratedSegment[]) => void;
 }
 
 export interface RunGenerationResult {
@@ -2078,11 +2128,10 @@ export interface RunGenerationResult {
 
 /**
  * End-to-end Chained Generation pipeline (5s – 30s + unlimited Extend Scene):
- * 1. Uploads original character references and (in I2V mode) the initial Start Frame via /upload/image.
+ * 1. Uploads the character portrait anchor (if used as start frame) or explicit Start Frame via /upload/image.
  * 2. Runs Segment 1 (0-5s) in the selected mode (T2V via workflow_t2v.json or I2V via workflow_i2v.json).
  * 3. For 10s – 30s durations (and Extend Scene continuations), extracts the last frame of each rendered
- *    segment via HTML5 <canvas>, uploads it, and passes BOTH the last frame AND the original character
- *    reference photos with locked identity weights (0.75–0.85) into every subsequent 5-second segment.
+ *    segment (via native FFmpeg in Electron or HTML5 <canvas>), uploads it, and chains into I2V.
  */
 export async function runComfyGeneration(
   options: RunGenerationOptions,
@@ -2099,6 +2148,7 @@ export async function runComfyGeneration(
     fallbackCharacterAnchors = [],
     signal,
     onProgress,
+    onSegmentCompleted,
   } = options;
   const validation = validateGenerationParams({
     settings,
@@ -2114,12 +2164,15 @@ export async function runComfyGeneration(
   const serverUrl = normalizeBaseUrl(settings.serverUrl);
   const plannedSegments = planGenerationSegments(settings.durationSec, settings.mode);
 
-  // Catch HTTPS -> HTTP Mixed Content immediately in browser preview before firing fetch/WebSocket.
+  // Non-loopback HTTP targets (e.g. http://192.168.x.x) are genuinely blocked on HTTPS pages.
+  // Loopback HTTP (127.0.0.1 / localhost / [::1]) is exempt under W3C Mixed Content Level 2,
+  // so allow direct fetch to attempt connecting instead of pre-emptively failing.
   if (
     typeof window !== 'undefined' &&
     !getElectronComfyBridge() &&
     window.location?.protocol === 'https:' &&
-    /^http:\/\//i.test(serverUrl)
+    /^http:\/\//i.test(serverUrl) &&
+    !isLoopbackHttpUrl(serverUrl)
   ) {
     throw new Error(
       classifyConnectionError({
@@ -2148,41 +2201,35 @@ export async function runComfyGeneration(
   const coreVideoCodec = preflightReport?.coreVideoCodec;
 
   const uploadedChars: WorkflowBuildCharacter[] = [];
-
-  if (characters.length > 0) {
-    for (let i = 0; i < characters.length; i += 1) {
-      if (signal.aborted) {
-        throw new Error('Генерация отменена пользователем.');
-      }
-      const char = characters[i];
-      onProgress({
-        phase: 'uploading',
-        percent: Math.round(((i + 0.5) / characters.length) * 6),
-        segmentIndex: 1,
-        totalSegments: plannedSegments.length,
-        segmentStartSec: 0,
-        segmentEndSec: SEGMENT_DURATION_SEC,
-        segmentMode: settings.mode,
-        identityAnchorCount: characters.length,
-        message: `Загрузка референса ${i + 1} из ${characters.length}: ${char.name || char.file.name}`,
-      });
-      const uploaded = await uploadImage(serverUrl, char.file, 'kinoflow_ref');
-      uploadedChars.push({
-        name: char.name || `Персонаж ${i + 1}`,
-        weight: char.weight,
-        imageFilename: uploaded.name,
-      });
-    }
-  } else if (fallbackCharacterAnchors.length > 0) {
-    uploadedChars.push(...fallbackCharacterAnchors.slice(0, 3));
-  }
-
   let currentStartFrameFilename: string | undefined;
 
-  // Wan 2.2 cannot take face references directly, so with no explicit start frame the first
-  // character photo is used as the start frame: segment 1 then runs through I2V.
-  if (!startFrame && !isContinuation && uploadedChars.length > 0) {
-    currentStartFrameFilename = uploadedChars[0].imageFilename;
+  // Wan 2.2 uses the character portrait as the I2V start frame when no explicit start frame is set.
+  // Only upload the primary character photo when it is actually referenced by the workflow.
+  if (!startFrame && !isContinuation && characters.length > 0) {
+    if (signal.aborted) {
+      throw new Error('Генерация отменена пользователем.');
+    }
+    const primaryChar = characters[0];
+    onProgress({
+      phase: 'uploading',
+      percent: 5,
+      segmentIndex: 1,
+      totalSegments: plannedSegments.length,
+      segmentStartSec: 0,
+      segmentEndSec: SEGMENT_DURATION_SEC,
+      segmentMode: 'i2v',
+      identityAnchorCount: 1,
+      message: `Загрузка портрета персонажа: ${primaryChar.name || primaryChar.file.name}`,
+    });
+    const uploaded = await uploadImage(serverUrl, primaryChar.file, 'kinoflow_ref');
+    uploadedChars.push({
+      name: primaryChar.name || 'Персонаж 1',
+      weight: primaryChar.weight,
+      imageFilename: uploaded.name,
+    });
+    currentStartFrameFilename = uploaded.name;
+  } else if (fallbackCharacterAnchors.length > 0) {
+    uploadedChars.push(fallbackCharacterAnchors[0]);
   }
 
   if (settings.mode === 'i2v' && startFrame) {
@@ -2293,7 +2340,30 @@ export async function runComfyGeneration(
       },
     });
 
-    renderedSegments.push({
+    let localFilePath: string | undefined;
+    const filmBridge =
+      typeof window !== 'undefined'
+        ? (window as unknown as {
+            kinoflowFilm?: {
+              archiveClip?: (
+                url: string,
+                filename?: string,
+              ) => Promise<{ ok: boolean; localPath?: string }>;
+            };
+          }).kinoflowFilm
+        : undefined;
+    if (filmBridge?.archiveClip) {
+      try {
+        const archived = await filmBridge.archiveClip(output.viewUrl, output.filename);
+        if (archived.ok && archived.localPath) {
+          localFilePath = archived.localPath;
+        }
+      } catch {
+        // Non-fatal: video is still available via ComfyUI /view URL
+      }
+    }
+
+    const completedSegment: GeneratedSegment = {
       index: segment.index,
       mode: route.workflowMode,
       startSec: segment.startSec,
@@ -2304,7 +2374,10 @@ export async function runComfyGeneration(
       subfolder: output.subfolder,
       fileType: output.type,
       seed: segmentSeed,
-    });
+      ...(localFilePath ? { localFilePath } : {}),
+    };
+    renderedSegments.push(completedSegment);
+    onSegmentCompleted?.(completedSegment, [...renderedSegments]);
 
     // If more segments remain, extract the last frame of this segment as PNG and upload it for the next I2V segment
     if (segment.index < segment.total) {

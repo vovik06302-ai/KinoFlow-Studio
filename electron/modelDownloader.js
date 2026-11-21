@@ -225,7 +225,8 @@ export class ModelDownloadManager {
     const scan = await scanModelsDirectory(trimmedDir, this.catalog);
 
     const queue = scan.models.filter((item) => {
-      if (requestedSet && !requestedSet.has(item.id)) return false;
+      if (requestedSet) return requestedSet.has(item.id) && item.status !== 'installed';
+      if (item.optional) return false;
       return item.status !== 'installed';
     });
 

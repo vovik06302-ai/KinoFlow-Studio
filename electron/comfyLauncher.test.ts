@@ -4,7 +4,12 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ComfyLauncher, buildComfyLaunchEnv, findLaunchScript } from './comfyLauncher.js';
+import {
+  ComfyLauncher,
+  buildComfyLaunchEnv,
+  detectComfyDirectory,
+  findLaunchScript,
+} from './comfyLauncher.js';
 
 type FakeChild = EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; pid: number };
 function fakeChild(): FakeChild {
@@ -107,3 +112,32 @@ test('ComfyLauncher.stop kills a running process, is a no-op otherwise and refus
   assert.match(linux.start('/x/run_nvidia_gpu.bat').error ?? '', /только в Windows/);
   assert.match(new ComfyLauncher({ platform: 'win32' }).start(null).error ?? '', /Не найден/);
 });
+
+test('ComfyLauncher launches ComfyUI.exe directly without cmd.exe and detectComfyDirectory finds valid installs', () => {
+  const child = fakeChild();
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const launcher = new ComfyLauncher({
+    platform: 'win32',
+    spawnImpl: (command: string, args: string[]) => {
+      calls.push({ command, args });
+      return child;
+    },
+  });
+
+  const exePath = 'C:\\Users\\Demo\\AppData\\Local\\Programs\\@comfyorgcomfyui-electron\\ComfyUI.exe';
+  assert.deepEqual(launcher.start(exePath), { ok: true, scriptPath: exePath });
+  assert.equal(calls[0].command, exePath);
+  assert.deepEqual(calls[0].args, []);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kf-detect-'));
+  try {
+    const docsComfy = path.join(root, 'Documents', 'ComfyUI');
+    fs.mkdirSync(path.join(docsComfy, 'models'), { recursive: true });
+
+    const detected = detectComfyDirectory({ homedir: root, env: {} });
+    assert.equal(detected, docsComfy);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+

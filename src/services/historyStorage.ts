@@ -77,12 +77,64 @@ export function loadHistory(): GenerationHistoryItem[] {
   }
 }
 
+export const HISTORY_AUTOSAVE_INTERVAL_MS = 30_000;
+
 export function saveHistory(items: GenerationHistoryItem[]): void {
   try {
     window.localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(0, MAX_HISTORY_ITEMS)));
   } catch {
     // Ignore storage quota errors
   }
+}
+
+export interface HistoryAutoSaveOptions {
+  intervalMs?: number;
+  saveFn?: (items: GenerationHistoryItem[]) => void;
+  setIntervalImpl?: (handler: () => void, timeout: number) => ReturnType<typeof setInterval>;
+  clearIntervalImpl?: (id: ReturnType<typeof setInterval>) => void;
+  windowTarget?: Pick<Window, 'addEventListener' | 'removeEventListener'> | null;
+}
+
+/**
+ * Starts periodic autosave of generation history to localStorage (every 30s by default)
+ * and flushes immediately on `beforeunload` / `pagehide` to protect against accidental closes.
+ * Returns a cleanup function that stops the timer and detaches listeners.
+ */
+export function startHistoryAutoSave(
+  getItems: () => GenerationHistoryItem[],
+  options: HistoryAutoSaveOptions = {},
+): () => void {
+  const intervalMs = options.intervalMs ?? HISTORY_AUTOSAVE_INTERVAL_MS;
+  const saveFn = options.saveFn ?? saveHistory;
+  const setIntervalImpl =
+    options.setIntervalImpl ?? ((fn, ms) => globalThis.setInterval(fn, ms));
+  const clearIntervalImpl =
+    options.clearIntervalImpl ?? ((id) => globalThis.clearInterval(id));
+  const windowTarget =
+    options.windowTarget !== undefined
+      ? options.windowTarget
+      : typeof window !== 'undefined'
+        ? window
+        : null;
+
+  const flush = () => {
+    saveFn(getItems());
+  };
+
+  const timerId = setIntervalImpl(flush, intervalMs);
+
+  if (windowTarget) {
+    windowTarget.addEventListener('beforeunload', flush);
+    windowTarget.addEventListener('pagehide', flush);
+  }
+
+  return () => {
+    clearIntervalImpl(timerId);
+    if (windowTarget) {
+      windowTarget.removeEventListener('beforeunload', flush);
+      windowTarget.removeEventListener('pagehide', flush);
+    }
+  };
 }
 
 export function loadSavedSettings(): Partial<GenerationSettings> | null {

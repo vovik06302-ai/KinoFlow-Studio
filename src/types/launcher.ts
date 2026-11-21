@@ -13,6 +13,7 @@ export interface LauncherState {
 export interface ElectronLauncherBridge {
   isElectron: boolean;
   getState: () => Promise<LauncherState>;
+  detectDir?: () => Promise<{ comfyDir: string | null }>;
   start: (comfyDir: string) => Promise<{ ok: boolean; scriptPath?: string; error?: string }>;
   stop: () => Promise<{ ok: boolean; wasRunning: boolean }>;
   onEvent: (callback: (event: LauncherEvent) => void) => () => void;

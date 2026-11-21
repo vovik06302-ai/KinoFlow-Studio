@@ -83,6 +83,9 @@ export interface GenerationSettings {
   rifeEnabled: boolean;
   rifeTargetFps: RifeTargetFps;
   shootingStyle: ShootingStyleId;
+  offlineMode?: boolean;
+  localLlmUrl?: string;
+  localLlmModel?: string;
 }
 
 export type ConnectionStatus = 'idle' | 'checking' | 'online' | 'offline';
@@ -136,6 +139,7 @@ export interface GeneratedSegment {
   subfolder: string;
   fileType: string;
   seed: number;
+  localFilePath?: string;
 }
 
 export interface HistoryCharacterSummary {
@@ -173,4 +177,5 @@ export interface GenerationHistoryItem {
   serverUrl: string;
   segments?: GeneratedSegment[];
   isExtendedFromId?: string;
+  localFilePath?: string;
 }

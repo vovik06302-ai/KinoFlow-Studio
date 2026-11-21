@@ -135,3 +135,111 @@ export async function mergeSegments({
     fs.rmSync(workDir, { recursive: true, force: true });
   }
 }
+
+export function buildExtractLastFrameArgs({ inputPath, outputPath }) {
+  return [
+    '-y',
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-sseof',
+    '-0.5',
+    '-i',
+    inputPath,
+    '-update',
+    '1',
+    '-frames:v',
+    '1',
+    outputPath,
+  ];
+}
+
+/**
+ * Extracts the exact final frame of an HTTP video URL as PNG bytes using local FFmpeg.
+ * Avoids transferring full MP4s over IPC or hitting browser <video>/<canvas> codec quirks.
+ */
+export async function extractLastFrameWithFfmpeg({
+  videoUrl,
+  ffmpegPath,
+  tempRoot = os.tmpdir(),
+  spawnImpl = spawn,
+  downloadImpl = downloadToFile,
+}) {
+  if (!ffmpegPath) {
+    const error = new Error('FFmpeg не найден.');
+    error.code = 'FFMPEG_NOT_FOUND';
+    throw error;
+  }
+  if (!isHttpUrl(videoUrl)) {
+    throw new Error('Некорректный адрес видео для извлечения кадра.');
+  }
+
+  const workDir = fs.mkdtempSync(path.join(tempRoot, 'kinoflow-frame-'));
+  try {
+    const videoPath = path.join(workDir, 'clip.mp4');
+    const framePath = path.join(workDir, 'last_frame.png');
+    await downloadImpl({ url: videoUrl, destPath: videoPath });
+
+    // Extract the final frame robustly: -sseof -0.5 seeks near the end and outputs the last frame.
+    let { code, stderr } = await runProcess(
+      ffmpegPath,
+      buildExtractLastFrameArgs({ inputPath: videoPath, outputPath: framePath }),
+      spawnImpl,
+    );
+
+    if (code !== 0 || !fs.existsSync(framePath)) {
+      // Fallback for ultra-short (<0.5s) clips: read from start and take the last decoded frame.
+      ({ code, stderr } = await runProcess(
+        ffmpegPath,
+        [
+          '-y',
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-i',
+          videoPath,
+          '-update',
+          '1',
+          framePath,
+        ],
+        spawnImpl,
+      ));
+    }
+
+    if (code !== 0 || !fs.existsSync(framePath)) {
+      throw new Error(
+        `FFmpeg не смог извлечь последний кадр (код ${code}). ${stderr.trim().split('\n').slice(-2).join(' ')}`,
+      );
+    }
+
+    const bytes = fs.readFileSync(framePath);
+    return {
+      pngBase64: bytes.toString('base64'),
+    };
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Saves a generated ComfyUI segment clip to a persistent local directory on disk
+ * so videos remain safely archived even if ComfyUI output is cleared or offline.
+ */
+export async function archiveVideoClip({
+  videoUrl,
+  archiveDir,
+  filename,
+  downloadImpl = downloadToFile,
+}) {
+  if (!isHttpUrl(videoUrl)) {
+    throw new Error('Некорректный URL клипа для локального архива.');
+  }
+  fs.mkdirSync(archiveDir, { recursive: true });
+  const safeName = path
+    .basename(String(filename || `kinoflow_${Date.now()}.mp4`))
+    .replace(/[^a-zA-Z0-9._-]+/g, '_');
+  const finalName = /\.(mp4|webm|mov)$/i.test(safeName) ? safeName : `${safeName}.mp4`;
+  const destPath = path.join(archiveDir, finalName);
+  await downloadImpl({ url: videoUrl, destPath });
+  return { localPath: destPath };
+}

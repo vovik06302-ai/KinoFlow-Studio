@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { enhanceScenePrompt, parseEnhancePromptResponse } from './promptService';
+import {
+  composeOfflineCinematicPrompt,
+  enhancePromptViaLocalLlm,
+  enhanceScenePrompt,
+  enhanceScenePromptDetailed,
+  parseEnhancePromptResponse,
+} from './promptService';
 import {
   buildEnhancePromptMessages,
   enhancePromptWithRetry,
@@ -39,21 +45,106 @@ test('parseEnhancePromptResponse propagates backend JSON error message cleanly',
   await assert.rejects(() => parseEnhancePromptResponse(res), /временно перегружен \(503\)/);
 });
 
-test('enhanceScenePrompt explains standalone Electron file:// limitation clearly', async () => {
-  await assert.rejects(
-    () =>
-      enhanceScenePrompt(
-        {
-          prompt: 'Девушка идёт по набережной',
-          model: 'Wan 2.2',
-          characters: [],
-          durationSec: 5,
-          resolution: '832x480',
-        },
-        { pageProtocol: 'file:' },
-      ),
-    /автономном Windows-приложении/,
+test('enhanceScenePromptDetailed works autonomously in Electron file:// and offlineMode via offline-composer', async () => {
+  const result = await enhanceScenePromptDetailed(
+    {
+      prompt: 'Девушка идёт по набережной',
+      model: 'Wan 2.2',
+      characters: [{ name: 'Марина', weight: 0.8 }],
+      durationSec: 5,
+      resolution: '832x480',
+      cameraMovement: 'slow smooth push-in',
+      lightingPreset: 'warm golden hour sunlight',
+      shootingStyleCue: 'Shot on ARRI Alexa 35',
+    },
+    { pageProtocol: 'file:' },
   );
+
+  assert.equal(result.source, 'offline-composer');
+  assert.match(result.enhancedPrompt, /Девушка идёт по набережной/);
+  assert.match(result.enhancedPrompt, /Марина/);
+  assert.match(result.enhancedPrompt, /slow smooth push-in/);
+  assert.match(result.enhancedPrompt, /warm golden hour sunlight/);
+  assert.match(result.enhancedPrompt, /ARRI Alexa 35/);
+
+  const offlineDirect = await enhanceScenePrompt(
+    {
+      prompt: 'Ночной дождь на проспекте',
+      model: 'Wan 2.2',
+      characters: [],
+      durationSec: 5,
+      resolution: '832x480',
+    },
+    { offlineMode: true },
+  );
+  assert.match(offlineDirect, /Ночной дождь на проспекте/);
+  assert.match(offlineDirect, /live-action cinema footage/);
+});
+
+test('composeOfflineCinematicPrompt avoids duplicating cues already present in the prompt', () => {
+  const composed = composeOfflineCinematicPrompt({
+    prompt: 'Марина идёт под дождём, slow smooth push-in',
+    model: 'Wan 2.2',
+    characters: [{ name: 'Марина', weight: 0.8 }],
+    durationSec: 5,
+    resolution: '832x480',
+    cameraMovement: 'slow smooth push-in',
+  });
+  assert.equal(composed.match(/slow smooth push-in/g)?.length, 1);
+  assert.equal(composed.includes('featuring Марина'), false);
+});
+
+test('enhancePromptViaLocalLlm supports Ollama /api/chat and OpenAI-compatible /v1/chat/completions', async () => {
+  const calls: string[] = [];
+  const ollamaFetch = (async (url: string) => {
+    calls.push(url);
+    return new Response(
+      JSON.stringify({ message: { content: '"Rain falls on wet asphalt, slow dolly forward."' } }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }) as unknown as typeof fetch;
+
+  const ollamaResult = await enhancePromptViaLocalLlm(
+    {
+      prompt: 'Дождь на асфальте',
+      model: 'Wan 2.2',
+      characters: [],
+      durationSec: 5,
+      resolution: '832x480',
+    },
+    { url: 'http://127.0.0.1:11434', model: 'qwen2.5:7b', fetchImpl: ollamaFetch },
+  );
+  assert.equal(calls[0], 'http://127.0.0.1:11434/api/chat');
+  assert.equal(ollamaResult, 'Rain falls on wet asphalt, slow dolly forward.');
+
+  const lmStudioFetch = (async (url: string) => {
+    calls.push(url);
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: 'Handheld tracking shot at dusk.' } }],
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }) as unknown as typeof fetch;
+
+  const detailed = await enhanceScenePromptDetailed(
+    {
+      prompt: 'Улица на закате',
+      model: 'Wan 2.2',
+      characters: [],
+      durationSec: 5,
+      resolution: '832x480',
+    },
+    {
+      offlineMode: true,
+      localLlmUrl: 'http://127.0.0.1:1234',
+      localLlmModel: 'local-model',
+      fetchImpl: lmStudioFetch,
+    },
+  );
+  assert.equal(calls[1], 'http://127.0.0.1:1234/v1/chat/completions');
+  assert.equal(detailed.source, 'local-llm');
+  assert.equal(detailed.enhancedPrompt, 'Handheld tracking shot at dusk.');
 });
 
 test('enhancePromptWithRetry retries 503 UNAVAILABLE and falls back to secondary model', async () => {

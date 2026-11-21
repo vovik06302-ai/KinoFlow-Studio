@@ -54,7 +54,7 @@ jobs:
             node --check "$f"
           done
           npm run lint
-          npx tsx --test electron/*.test.ts src/services/*.test.ts
+          npx tsx --test electron/*.test.ts src/services/*.test.ts src/utils/*.test.ts
 
       - name: Read app version from package.json
         id: pkg
@@ -62,6 +62,29 @@ jobs:
         run: |
           VERSION=$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).version)")
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache static Windows FFmpeg binary
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: resources/ffmpeg.exe
+          key: ${{ runner.os }}-ffmpeg-essentials-v1
+
+      - name: Download static FFmpeg for offline Windows bundle
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path resources | Out-Null
+          $zipPath = Join-Path $env:RUNNER_TEMP "ffmpeg-essentials.zip"
+          $extractDir = Join-Path $env:RUNNER_TEMP "ffmpeg-extract"
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile $zipPath -UseBasicParsing
+          Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+          $ffmpegExe = Get-ChildItem -Path $extractDir -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1
+          if (-not $ffmpegExe) {
+            throw "ffmpeg.exe not found inside downloaded archive"
+          }
+          Copy-Item -Path $ffmpegExe.FullName -Destination "resources/ffmpeg.exe" -Force
+          & "resources/ffmpeg.exe" -version | Select-Object -First 1
 
       - name: Build React frontend for Electron
         run: npm run build:renderer

@@ -3,11 +3,9 @@ import type { CameraPresetId, StoryboardShot } from '../services/storyboard';
 
 interface StoryboardPanelProps {
   durationSec: number;
-  camera: CameraPresetId;
   storyboardEnabled: boolean;
   shots: StoryboardShot[];
   disabled: boolean;
-  onCameraChange: (camera: CameraPresetId) => void;
   onStoryboardEnabledChange: (enabled: boolean) => void;
   onShotsChange: (shots: StoryboardShot[]) => void;
 }
@@ -17,11 +15,9 @@ const SELECT_CLASS =
 
 export function StoryboardPanel({
   durationSec,
-  camera,
   storyboardEnabled,
   shots,
   disabled,
-  onCameraChange,
   onStoryboardEnabledChange,
   onShotsChange,
 }: StoryboardPanelProps) {
@@ -36,25 +32,14 @@ export function StoryboardPanel({
   };
 
   return (
-    <section aria-label="Камера и раскадровка" className="mt-6 border-t border-[#1D222E] pt-5">
+    <section aria-label="Раскадровка по сегментам" className="mt-6 border-t border-[#1D222E] pt-5">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold tracking-tight text-[#F1F5F9]">Камера и раскадровка</h3>
-        <label className="flex items-center gap-2 text-xs text-[#94A3B8]">
-          <span>Камера</span>
-          <select
-            aria-label="Движение камеры"
-            value={camera}
-            disabled={disabled}
-            onChange={(e) => onCameraChange(e.target.value as CameraPresetId)}
-            className={SELECT_CLASS}
-          >
-            {CAMERA_PRESETS.map((preset) => (
-              <option key={preset.id} value={preset.id}>
-                {preset.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        <h3 className="text-sm font-semibold tracking-tight text-[#F1F5F9]">
+          Раскадровка по сегментам
+        </h3>
+        <span className="font-mono text-[11px] text-[#64748B]">
+          {canStoryboard ? `${segmentCount} сегм. по 5 с` : 'от 10 с'}
+        </span>
       </div>
 
       {canStoryboard ? (

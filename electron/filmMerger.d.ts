@@ -27,3 +27,20 @@ export declare function mergeSegments(options: {
   downloadImpl?: (options: { url: string; destPath: string }) => Promise<unknown>;
   onProgress?: (event: { phase: 'downloading' | 'encoding'; index: number; total: number }) => void;
 }): Promise<{ outputPath: string }>;
+export declare function buildExtractLastFrameArgs(options: {
+  inputPath: string;
+  outputPath: string;
+}): string[];
+export declare function extractLastFrameWithFfmpeg(options: {
+  videoUrl: string;
+  ffmpegPath: string | null;
+  tempRoot?: string;
+  spawnImpl?: unknown;
+  downloadImpl?: (options: { url: string; destPath: string }) => Promise<unknown>;
+}): Promise<{ pngBase64: string }>;
+export declare function archiveVideoClip(options: {
+  videoUrl: string;
+  archiveDir: string;
+  filename?: string;
+  downloadImpl?: (options: { url: string; destPath: string }) => Promise<unknown>;
+}): Promise<{ localPath: string }>;

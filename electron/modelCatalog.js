@@ -78,6 +78,45 @@ export const REQUIRED_MODELS = [
       'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors',
     expectedSizeBytes: 253815318,
   },
+  {
+    id: 'wan22-ti2v-5b',
+    name: 'Wan 2.2 TI2V-5B (Быстрая T2V+I2V)',
+    category: 'Diffusion · 5B (Доп.)',
+    description: 'Облегчённая универсальная модель T2V+I2V для видеокарт с 8–12 ГБ VRAM (загружается в FP8 на лету).',
+    filename: 'wan2.2_ti2v_5B_fp16.safetensors',
+    targetSubfolder: 'models/diffusion_models',
+    repoId: 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+    downloadUrl:
+      'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors',
+    expectedSizeBytes: 9999658848,
+    optional: true,
+  },
+  {
+    id: 'wan-22-vae',
+    name: 'Video VAE 48ch (wan2.2_vae)',
+    category: 'VAE · 5B (Доп.)',
+    description: 'Обязательный 48-канальный VAE декодер для облегчённой модели Wan 2.2 TI2V-5B.',
+    filename: 'wan2.2_vae.safetensors',
+    targetSubfolder: 'models/vae',
+    repoId: 'Comfy-Org/Wan_2.2_ComfyUI_Repackaged',
+    downloadUrl:
+      'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan2.2_vae.safetensors',
+    expectedSizeBytes: 1409400960,
+    optional: true,
+  },
+  {
+    id: 'upscale-4x-ultrasharp',
+    name: 'Апскейлер 4x-UltraSharp (1080p)',
+    category: 'Upscale · 1080p (Доп.)',
+    description: 'Модель детализации для переключателя «Кино-апскейл до 1080p» в настройках студии.',
+    filename: '4x-UltraSharp.pth',
+    targetSubfolder: 'models/upscale_models',
+    repoId: 'Kim2091/UltraSharp',
+    downloadUrl:
+      'https://huggingface.co/Kim2091/UltraSharp/resolve/main/4x-UltraSharp.pth',
+    expectedSizeBytes: 66961958,
+    optional: true,
+  },
 ];
 
 /**

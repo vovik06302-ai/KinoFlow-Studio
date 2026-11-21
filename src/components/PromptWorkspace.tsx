@@ -1,6 +1,9 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronUp, Loader2, RotateCcw, Wand2 } from 'lucide-react';
-import { CAMERA_MOVEMENTS, LIGHTING_PRESETS } from '../../serverPromptHelper';
+import { LIGHTING_PRESETS } from '../../serverPromptHelper';
+import { PROMPT_TEMPLATES, appendPromptTemplate } from '../services/promptTemplates';
+import { CAMERA_PRESETS } from '../services/storyboard';
+import type { CameraPresetId } from '../services/storyboard';
 import type { CharacterReference } from '../types/video';
 
 interface PromptWorkspaceProps {
@@ -8,12 +11,19 @@ interface PromptWorkspaceProps {
   originalPromptBeforeEnhance: string | null;
   negativePrompt: string;
   characters: CharacterReference[];
+  cameraPreset: CameraPresetId;
+  lightingPreset: string;
+  enhanceSourceLabel?: string | null;
   isEnhancing: boolean;
   enhanceError: string | null;
+  offlineMode?: boolean;
+  hasLocalLlm?: boolean;
   disabled: boolean;
   onPromptChange: (value: string) => void;
   onNegativePromptChange: (value: string) => void;
-  onEnhancePrompt: (params: { cameraMovement?: string; lightingPreset?: string }) => void;
+  onCameraPresetChange: (camera: CameraPresetId) => void;
+  onLightingPresetChange: (lightingCue: string) => void;
+  onEnhancePrompt: () => void;
   onRevertEnhancedPrompt: () => void;
 }
 
@@ -22,26 +32,29 @@ export function PromptWorkspace({
   originalPromptBeforeEnhance,
   negativePrompt,
   characters,
+  cameraPreset,
+  lightingPreset,
+  enhanceSourceLabel,
   isEnhancing,
   enhanceError,
+  offlineMode = false,
+  hasLocalLlm = false,
   disabled,
   onPromptChange,
   onNegativePromptChange,
+  onCameraPresetChange,
+  onLightingPresetChange,
   onEnhancePrompt,
   onRevertEnhancedPrompt,
 }: PromptWorkspaceProps) {
   const [showNegative, setShowNegative] = useState(false);
-  const [selectedCamera, setSelectedCamera] = useState(CAMERA_MOVEMENTS[0].cue);
-  const [selectedLighting, setSelectedLighting] = useState(LIGHTING_PRESETS[0].cue);
-
   const namedCharacters = characters.filter((c) => c.name.trim().length > 0);
 
-  const handleEnhance = () => {
-    onEnhancePrompt({ 
-      cameraMovement: selectedCamera, 
-      lightingPreset: selectedLighting 
-    });
-  };
+  const enhanceHint = hasLocalLlm
+    ? 'Улучшение промпта через локальную LLM (автономно)'
+    : offlineMode
+      ? 'Автономный кинематографический конструктор промпта (без интернета)'
+      : 'Камера и освещение применяются сразу к генерации и при улучшении промпта';
 
   return (
     <section aria-label="Рабочая область промптов" className="pt-6">
@@ -66,7 +79,7 @@ export function PromptWorkspace({
           )}
           <button
             type="button"
-            onClick={handleEnhance}
+            onClick={onEnhancePrompt}
             disabled={disabled || isEnhancing || !prompt.trim()}
             className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-[#E58E26]/45 bg-[#E58E26]/12 px-3 py-1.5 text-xs font-medium text-[#F6AD55] transition-colors hover:bg-[#E58E26]/20 focus-visible:outline-2 focus-visible:outline-[#E58E26] disabled:cursor-not-allowed disabled:opacity-45"
           >
@@ -80,27 +93,81 @@ export function PromptWorkspace({
         </div>
       </div>
 
-      <div className="mb-4 grid grid-cols-2 gap-3">
+      <div className="mb-3 grid grid-cols-2 gap-3">
         <div className="flex flex-col gap-1.5">
-          <label className="text-[11px] text-[#94A3B8] uppercase tracking-wider">Движение камеры</label>
-          <select 
-            value={selectedCamera}
-            onChange={(e) => setSelectedCamera(e.target.value)}
-            className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2 py-1.5 text-xs text-[#F1F5F9] focus:border-[#E58E26] outline-none"
+          <label
+            htmlFor="prompt-camera-select"
+            className="text-[11px] uppercase tracking-wider text-[#94A3B8]"
           >
-            {CAMERA_MOVEMENTS.map(m => <option key={m.cue} value={m.cue}>{m.label}</option>)}
+            Движение камеры
+          </label>
+          <select
+            id="prompt-camera-select"
+            value={cameraPreset}
+            disabled={disabled}
+            onChange={(e) => onCameraPresetChange(e.target.value as CameraPresetId)}
+            className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2 py-1.5 text-xs text-[#F1F5F9] outline-none focus:border-[#E58E26] disabled:opacity-60"
+          >
+            {CAMERA_PRESETS.map((preset) => (
+              <option key={preset.id} value={preset.id} className="bg-[#141821] text-[#F1F5F9]">
+                {preset.label}
+              </option>
+            ))}
           </select>
         </div>
         <div className="flex flex-col gap-1.5">
-          <label className="text-[11px] text-[#94A3B8] uppercase tracking-wider">Освещение</label>
-          <select 
-            value={selectedLighting}
-            onChange={(e) => setSelectedLighting(e.target.value)}
-            className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2 py-1.5 text-xs text-[#F1F5F9] focus:border-[#E58E26] outline-none"
+          <label
+            htmlFor="prompt-lighting-select"
+            className="text-[11px] uppercase tracking-wider text-[#94A3B8]"
           >
-            {LIGHTING_PRESETS.map(l => <option key={l.cue} value={l.cue}>{l.label}</option>)}
+            Освещение
+          </label>
+          <select
+            id="prompt-lighting-select"
+            value={lightingPreset}
+            disabled={disabled}
+            onChange={(e) => onLightingPresetChange(e.target.value)}
+            className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2 py-1.5 text-xs text-[#F1F5F9] outline-none focus:border-[#E58E26] disabled:opacity-60"
+          >
+            <option value="" className="bg-[#141821] text-[#F1F5F9]">
+              По умолчанию (из стиля)
+            </option>
+            {LIGHTING_PRESETS.map((l) => (
+              <option key={l.cue} value={l.cue} className="bg-[#141821] text-[#F1F5F9]">
+                {l.label}
+              </option>
+            ))}
           </select>
         </div>
+      </div>
+
+      <div className="mb-4 flex flex-col gap-1.5">
+        <label
+          htmlFor="prompt-template-select"
+          className="text-[11px] uppercase tracking-wider text-[#94A3B8]"
+        >
+          Шаблон промпта
+        </label>
+        <select
+          id="prompt-template-select"
+          value=""
+          disabled={disabled || isEnhancing}
+          onChange={(e) => {
+            const templateId = e.target.value;
+            if (!templateId) return;
+            onPromptChange(appendPromptTemplate(prompt, templateId));
+          }}
+          className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 text-xs text-[#F1F5F9] outline-none focus:border-[#E58E26] disabled:opacity-60"
+        >
+          <option value="" className="bg-[#141821] text-[#94A3B8]">
+            Добавить готовый шаблон к промпту...
+          </option>
+          {PROMPT_TEMPLATES.map((template) => (
+            <option key={template.id} value={template.id} className="bg-[#141821] text-[#F1F5F9]">
+              {template.label}
+            </option>
+          ))}
+        </select>
       </div>
 
       <textarea
@@ -115,9 +182,11 @@ export function PromptWorkspace({
 
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#64748B]">
         <span>
-          {namedCharacters.length > 0
-            ? `Имена в промпте: ${namedCharacters.map((c) => c.name.trim()).join(', ')}`
-            : 'Gemini переведёт сцену в кинематографичный английский промпт'}
+          {enhanceSourceLabel
+            ? enhanceSourceLabel
+            : namedCharacters.length > 0
+              ? `Персонаж в промпте: ${namedCharacters.map((c) => c.name.trim()).join(', ')}`
+              : enhanceHint}
         </span>
         <span className="font-mono tabular-nums">{prompt.length} симв.</span>
       </div>

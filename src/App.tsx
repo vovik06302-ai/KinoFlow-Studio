@@ -20,6 +20,7 @@ import {
   SEGMENT_DURATION_SEC,
   SHOOTING_STYLES,
   VIDEO_MODELS,
+  applyLightingToPrompt,
   applyShootingStyleToPrompt,
   checkConnection,
   computeOutputFps,
@@ -33,19 +34,21 @@ import {
   secondsToAlignedFrames,
 } from './services/comfyService';
 import {
+  HISTORY_AUTOSAVE_INTERVAL_MS,
   loadHistory,
   loadSavedSettings,
   saveHistory,
   saveSettings,
+  startHistoryAutoSave,
 } from './services/historyStorage';
 import { DEFAULT_COMFY_DIR } from './services/modelManagerService';
 import { PreflightError } from './services/preflightService';
 import { exportScenePreset } from './services/scenePreset';
 import type { ScenePreset } from './services/scenePreset';
-import { countStoryboardSegments, resizeStoryboard } from './services/storyboard';
+import { countStoryboardSegments, getCameraPreset, resizeStoryboard } from './services/storyboard';
 import type { CameraPresetId, StoryboardShot } from './services/storyboard';
 import type { PreflightReport } from './services/preflightService';
-import { enhanceScenePrompt } from './services/promptService';
+import { enhanceScenePromptDetailed } from './services/promptService';
 import { extractLastFrameFromVideo } from './utils/videoFrameUtils';
 import type {
   BaseModelId,
@@ -88,6 +91,9 @@ function getInitialSettings(): GenerationSettings {
     rifeEnabled: false,
     rifeTargetFps: 24,
     shootingStyle: 'arri-35mm',
+    offlineMode: false,
+    localLlmUrl: '',
+    localLlmModel: '',
   };
 
   const saved = loadSavedSettings();
@@ -130,6 +136,9 @@ function getInitialSettings(): GenerationSettings {
     rifeEnabled: Boolean(saved.rifeEnabled),
     rifeTargetFps: validRifeFps,
     shootingStyle: validStyle,
+    offlineMode: Boolean(saved.offlineMode),
+    localLlmUrl: typeof saved.localLlmUrl === 'string' ? saved.localLlmUrl : '',
+    localLlmModel: typeof saved.localLlmModel === 'string' ? saved.localLlmModel : '',
   };
 }
 
@@ -152,10 +161,12 @@ export default function App() {
   );
   const [negativePrompt, setNegativePrompt] = useState(DEFAULT_NEGATIVE_PROMPT);
   const [cameraPreset, setCameraPreset] = useState<CameraPresetId>('none');
+  const [lightingPreset, setLightingPreset] = useState('');
   const [storyboardEnabled, setStoryboardEnabled] = useState(false);
   const [storyboardShots, setStoryboardShots] = useState<StoryboardShot[]>([]);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [enhanceError, setEnhanceError] = useState<string | null>(null);
+  const [enhanceSourceLabel, setEnhanceSourceLabel] = useState<string | null>(null);
 
   const [progress, setProgress] = useState<GenerationProgress>(IDLE_PROGRESS);
   const [generationError, setGenerationError] = useState<string | null>(null);
@@ -173,6 +184,8 @@ export default function App() {
   });
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const historyRef = useRef<GenerationHistoryItem[]>(history);
+  historyRef.current = history;
   const charactersRef = useRef<CharacterReference[]>(characters);
   charactersRef.current = characters;
   const startFrameRef = useRef<StartFrameReference | null>(startFrame);
@@ -208,6 +221,12 @@ export default function App() {
   useEffect(() => {
     saveHistory(history);
   }, [history]);
+
+  useEffect(() => {
+    return startHistoryAutoSave(() => historyRef.current, {
+      intervalMs: HISTORY_AUTOSAVE_INTERVAL_MS,
+    });
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -253,6 +272,39 @@ export default function App() {
     setExtendingSourceVideo(null);
   }, []);
 
+  useEffect(() => {
+    if (!isElectronComfyBridgeAvailable()) return;
+    let active = true;
+
+    const launcher = typeof window !== 'undefined' ? window.kinoflowLauncher : undefined;
+    if (launcher?.detectDir) {
+      void launcher
+        .detectDir()
+        .then((res) => {
+          if (active && res.comfyDir && res.comfyDir !== settings.comfyDir) {
+            setSettings((prev) => ({ ...prev, comfyDir: res.comfyDir! }));
+          }
+        })
+        .catch(() => undefined);
+    }
+
+    void checkConnection(settings.serverUrl, 3500)
+      .then((result) => {
+        if (!active) return;
+        if (result.detectedUrl && result.detectedUrl !== settings.serverUrl) {
+          setSettings((prev) => ({ ...prev, serverUrl: result.detectedUrl! }));
+        }
+        setConnection(result);
+      })
+      .catch(() => undefined);
+
+    return () => {
+      active = false;
+    };
+    // Run initial Electron environment auto-detection once on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleCheckConnection = useCallback(async () => {
     setConnection({ status: 'checking', message: 'Подключение к серверу ComfyUI...' });
     const result = await checkConnection(settings.serverUrl);
@@ -264,7 +316,7 @@ export default function App() {
 
   const handleAddCharacterFiles = useCallback((files: File[]) => {
     setCharacters((prev) => {
-      const remaining = Math.max(0, 3 - prev.length);
+      const remaining = Math.max(0, 1 - prev.length);
       if (remaining === 0) return prev;
       const accepted = files.slice(0, remaining);
       const nextItems: CharacterReference[] = accepted.map((file, idx) => {
@@ -301,24 +353,26 @@ export default function App() {
   const handlePromptChange = useCallback((value: string) => {
     setPrompt(value);
     setEnhanceError(null);
+    setEnhanceSourceLabel(null);
     setGenerationError(null);
   }, []);
 
-  const handleEnhancePrompt = useCallback(
-    async (options?: { cameraMovement?: string; lightingPreset?: string }) => {
-      const trimmed = prompt.trim();
-      if (!trimmed) {
-        setEnhanceError('Введите описание сцены перед улучшением промпта.');
-        return;
-      }
+  const handleEnhancePrompt = useCallback(async () => {
+    const trimmed = prompt.trim();
+    if (!trimmed) {
+      setEnhanceError('Введите описание сцены перед улучшением промпта.');
+      return;
+    }
 
-      setIsEnhancing(true);
-      setEnhanceError(null);
+    setIsEnhancing(true);
+    setEnhanceError(null);
 
-      try {
-        const modelOption = getModelOption(settings.modelId);
-        const styleOption = getShootingStyleOption(settings.shootingStyle);
-        const enhanced = await enhanceScenePrompt({
+    try {
+      const modelOption = getModelOption(settings.modelId);
+      const styleOption = getShootingStyleOption(settings.shootingStyle);
+      const cameraCue = getCameraPreset(cameraPreset).cue;
+      const result = await enhanceScenePromptDetailed(
+        {
           prompt: trimmed,
           model: `${modelOption.label} (${settings.mode === 'i2v' ? 'Image-to-Video' : 'Text-to-Video'})`,
           characters: characters.map((c) => ({ name: c.name, weight: c.weight })),
@@ -328,29 +382,41 @@ export default function App() {
             : `${settings.width}x${settings.height}`,
           shootingStyleLabel: styleOption.label,
           shootingStyleCue: styleOption.promptCue,
-          cameraMovement: options?.cameraMovement,
-          lightingPreset: options?.lightingPreset,
-        });
+          cameraMovement: cameraCue || undefined,
+          lightingPreset: lightingPreset || undefined,
+        },
+        {
+          offlineMode: Boolean(settings.offlineMode),
+          localLlmUrl: settings.localLlmUrl,
+          localLlmModel: settings.localLlmModel,
+        },
+      );
 
-        if (originalPromptBeforeEnhance === null) {
-          setOriginalPromptBeforeEnhance(trimmed);
-        }
-        setPrompt(enhanced);
-      } catch (err) {
-        const message =
-          err instanceof Error ? err.message : 'Ошибка обращения к сервису улучшения промптов.';
-        setEnhanceError(message);
-      } finally {
-        setIsEnhancing(false);
+      if (originalPromptBeforeEnhance === null) {
+        setOriginalPromptBeforeEnhance(trimmed);
       }
-    },
-    [prompt, settings, characters, originalPromptBeforeEnhance],
-  );
+      setPrompt(result.enhancedPrompt);
+      setEnhanceSourceLabel(
+        result.source === 'local-llm'
+          ? 'Улучшено: локальная LLM (автономно)'
+          : result.source === 'offline-composer'
+            ? 'Улучшено: автономный кинематографический конструктор'
+            : 'Улучшено: Gemini',
+      );
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Ошибка обращения к сервису улучшения промптов.';
+      setEnhanceError(message);
+    } finally {
+      setIsEnhancing(false);
+    }
+  }, [prompt, settings, characters, cameraPreset, lightingPreset, originalPromptBeforeEnhance]);
 
   const handleRevertEnhancedPrompt = useCallback(() => {
     if (originalPromptBeforeEnhance !== null) {
       setPrompt(originalPromptBeforeEnhance);
       setOriginalPromptBeforeEnhance(null);
+      setEnhanceSourceLabel(null);
     }
   }, [originalPromptBeforeEnhance]);
 
@@ -486,6 +552,8 @@ export default function App() {
       message: 'Инициализация пайплайна ComfyUI...',
     });
 
+    const completedSegmentsCheckpoint: GeneratedSegment[] = [];
+
     try {
       const fallbackCharacterAnchors =
         characters.length === 0 && extendingSourceVideo?.characters
@@ -498,9 +566,14 @@ export default function App() {
               }))
           : [];
 
-      const effectivePositivePrompt = applyShootingStyleToPrompt(
+      const styledPrompt = applyShootingStyleToPrompt(
         activePrompt,
         runSettings.shootingStyle,
+        originalPromptBeforeEnhance !== null,
+      );
+      const effectivePositivePrompt = applyLightingToPrompt(
+        styledPrompt,
+        lightingPreset,
         originalPromptBeforeEnhance !== null,
       );
 
@@ -519,6 +592,10 @@ export default function App() {
         fallbackCharacterAnchors,
         signal: controller.signal,
         onProgress: setProgress,
+        onSegmentCompleted: (_seg, allCompleted) => {
+          completedSegmentsCheckpoint.length = 0;
+          completedSegmentsCheckpoint.push(...allCompleted);
+        },
       });
 
       const modelOption = getModelOption(runSettings.modelId);
@@ -558,6 +635,7 @@ export default function App() {
         totalDurationSec = baseOffsetSec + runSettings.durationSec;
       }
 
+      const lastRenderedSeg = result.segments[result.segments.length - 1];
       const item: GenerationHistoryItem = {
         id: result.promptId,
         createdAt: new Date().toISOString(),
@@ -596,6 +674,7 @@ export default function App() {
         subfolder: result.output.subfolder,
         fileType: result.output.type,
         serverUrl: runSettings.serverUrl,
+        localFilePath: lastRenderedSeg?.localFilePath,
         segments: combinedSegments,
         isExtendedFromId: extendingSourceVideo?.id,
       };
@@ -610,26 +689,72 @@ export default function App() {
         err instanceof Error
           ? err.message
           : 'Не удалось связаться с локальным сервером ComfyUI.';
+
+      // Save any already-finished segments so multi-segment progress is never lost
+      let partialSavedNote = '';
+      if (completedSegmentsCheckpoint.length > 0) {
+        const modelOption = getModelOption(runSettings.modelId);
+        const lastDone = completedSegmentsCheckpoint[completedSegmentsCheckpoint.length - 1];
+        const partialDuration = completedSegmentsCheckpoint.length * SEGMENT_DURATION_SEC;
+        const partialItem: GenerationHistoryItem = {
+          id: lastDone.promptId,
+          createdAt: new Date().toISOString(),
+          mode: runSettings.mode,
+          prompt: originalPromptBeforeEnhance || activePrompt,
+          enhancedPrompt: originalPromptBeforeEnhance ? activePrompt : undefined,
+          negativePrompt,
+          modelId: runSettings.modelId,
+          modelLabel: `${modelOption.shortLabel} (частично)`,
+          width: runSettings.width,
+          height: runSettings.height,
+          durationSec: partialDuration,
+          fps: runSettings.fps,
+          outputFps: computeOutputFps(runSettings.fps, runSettings.rifeEnabled),
+          upscale1080p: runSettings.upscale1080p,
+          rifeEnabled: runSettings.rifeEnabled,
+          rifeTargetFps: runSettings.rifeTargetFps,
+          shootingStyle: runSettings.shootingStyle,
+          frames: runSettings.frames,
+          steps: runSettings.steps,
+          seed: runSettings.seed,
+          characters: characters.map((c, idx) => ({
+            name: c.name.trim() || `Персонаж ${idx + 1}`,
+            weight: c.weight,
+          })),
+          videoUrl: lastDone.videoUrl,
+          filename: lastDone.filename,
+          subfolder: lastDone.subfolder,
+          fileType: lastDone.fileType,
+          serverUrl: runSettings.serverUrl,
+          localFilePath: lastDone.localFilePath,
+          segments: [...completedSegmentsCheckpoint],
+        };
+        setHistory((prev) => [partialItem, ...prev.filter((h) => h.id !== partialItem.id)]);
+        setActiveVideo(partialItem);
+        partialSavedNote = ` Готовые сегменты (${completedSegmentsCheckpoint.length} шт., ${partialDuration} с) сохранены в историю — можно продолжить с последнего кадра.`;
+      }
+
       setProgress({
         phase: isCancelled ? 'cancelled' : 'error',
         percent: 0,
-        message: isCancelled ? 'Генерация отменена' : '',
+        message: isCancelled
+          ? `Генерация отменена.${partialSavedNote}`
+          : '',
       });
       if (!isCancelled && err instanceof PreflightError) {
         setPreflightReport(err.report);
         setGenerationError('Проверка перед запуском нашла, чего не хватает в ComfyUI.');
       } else if (!isCancelled) {
-        setGenerationError(
-          formatGenerationErrorMessage({
-            message: msg,
-            serverUrl: runSettings.serverUrl,
-            isElectron: isElectronComfyBridgeAvailable(),
-            pageProtocol:
-              typeof window !== 'undefined' && window.location
-                ? window.location.protocol
-                : undefined,
-          }),
-        );
+        const formatted = formatGenerationErrorMessage({
+          message: msg,
+          serverUrl: runSettings.serverUrl,
+          isElectron: isElectronComfyBridgeAvailable(),
+          pageProtocol:
+            typeof window !== 'undefined' && window.location
+              ? window.location.protocol
+              : undefined,
+        });
+        setGenerationError(`${formatted}${partialSavedNote}`);
       }
     } finally {
       abortControllerRef.current = null;
@@ -646,6 +771,7 @@ export default function App() {
     storyboardEnabled,
     storyboardShots,
     cameraPreset,
+    lightingPreset,
   ]);
 
   const handleCancelGeneration = useCallback(() => {
@@ -820,7 +946,7 @@ export default function App() {
 
           {/* Zone 3: Compact Auto-Routing status + Single primary CTA */}
           <div className="flex shrink-0 items-center gap-3">
-            <UpdateControl busy={isGenerating} />
+            <UpdateControl busy={isGenerating} offlineMode={Boolean(settings.offlineMode)} />
             <span
               data-testid="auto-routing-status"
               className="hidden whitespace-nowrap font-mono text-[11px] text-[#94A3B8] xl:inline"
@@ -985,7 +1111,7 @@ export default function App() {
 
                 <CharacterReferencesPanel
                   characters={characters}
-                  maxCharacters={3}
+                  maxCharacters={1}
                   disabled={isGenerating}
                   onAddFiles={handleAddCharacterFiles}
                   onUpdateCharacter={handleUpdateCharacter}
@@ -997,22 +1123,27 @@ export default function App() {
                   originalPromptBeforeEnhance={originalPromptBeforeEnhance}
                   negativePrompt={negativePrompt}
                   characters={characters}
+                  cameraPreset={cameraPreset}
+                  lightingPreset={lightingPreset}
+                  enhanceSourceLabel={enhanceSourceLabel}
                   isEnhancing={isEnhancing}
                   enhanceError={enhanceError}
+                  offlineMode={Boolean(settings.offlineMode)}
+                  hasLocalLlm={Boolean(settings.localLlmUrl?.trim())}
                   disabled={isGenerating}
                   onPromptChange={handlePromptChange}
                   onNegativePromptChange={setNegativePrompt}
-                  onEnhancePrompt={(opts) => void handleEnhancePrompt(opts)}
+                  onCameraPresetChange={setCameraPreset}
+                  onLightingPresetChange={setLightingPreset}
+                  onEnhancePrompt={() => void handleEnhancePrompt()}
                   onRevertEnhancedPrompt={handleRevertEnhancedPrompt}
                 />
 
                 <StoryboardPanel
                   durationSec={settings.durationSec}
-                  camera={cameraPreset}
                   storyboardEnabled={storyboardEnabled}
                   shots={storyboardShots}
                   disabled={isGenerating}
-                  onCameraChange={setCameraPreset}
                   onStoryboardEnabledChange={setStoryboardEnabled}
                   onShotsChange={setStoryboardShots}
                 />

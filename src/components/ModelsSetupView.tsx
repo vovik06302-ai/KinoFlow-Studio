@@ -235,12 +235,15 @@ export function ModelsSetupView({
   };
 
   const requiredSet = useMemo(() => new Set(requiredModelIds), [requiredModelIds]);
+  const coreModels = useMemo(() => models.filter((m) => !m.optional), [models]);
+  const optionalModels = useMemo(() => models.filter((m) => Boolean(m.optional)), [models]);
 
   const summary = useMemo(() => {
-    const installedCount = models.filter((m) => m.status === 'installed').length;
-    const missingModels = models.filter((m) => m.status !== 'installed');
-    const requiredMissingModels = missingModels.filter((m) => requiredSet.has(m.id));
-    const remainingBytes = missingModels.reduce(
+    const installedCount = coreModels.filter((m) => m.status === 'installed').length;
+    const missingCoreModels = coreModels.filter((m) => m.status !== 'installed');
+    const allMissingModels = models.filter((m) => m.status !== 'installed');
+    const requiredMissingModels = allMissingModels.filter((m) => requiredSet.has(m.id));
+    const remainingBytes = missingCoreModels.reduce(
       (sum, m) => sum + Math.max(0, m.expectedSizeBytes - m.partialSizeBytes),
       0,
     );
@@ -249,14 +252,14 @@ export function ModelsSetupView({
       0,
     );
     return {
-      totalCount: models.length,
+      totalCount: coreModels.length,
       installedCount,
-      missingCount: missingModels.length,
+      missingCount: missingCoreModels.length,
       remainingBytes,
       requiredMissingIds: requiredMissingModels.map((m) => m.id),
       requiredRemainingBytes,
     };
-  }, [models, requiredSet]);
+  }, [coreModels, models, requiredSet]);
 
   const handleCopyVhsCmd = async () => {
     try {
@@ -446,15 +449,15 @@ export function ModelsSetupView({
             id="required-models-heading"
             className="text-sm font-semibold tracking-tight text-[#F1F5F9]"
           >
-            Обязательные модели для фотореалистичной генерации (Wan 2.2)
+            Обязательные модели для фотореалистичной генерации (Wan 2.2 14B FP8)
           </h2>
           <span className="font-mono text-xs tabular-nums text-[#64748B]">
-            {models.length} файлов
+            {coreModels.length} файлов
           </span>
         </div>
 
         <ul className="divide-y divide-[#1E2330] rounded-lg border border-[#222734] bg-[#10141C]">
-          {models.map((model) => {
+          {coreModels.map((model) => {
             const live = progressById[model.id];
             const isDownloading = live?.state === 'downloading';
             const isQueued = live?.state === 'queued';
@@ -665,6 +668,131 @@ export function ModelsSetupView({
           })}
         </ul>
       </section>
+
+      {/* Optional Models: Fast 5B & 1080p Upscaler */}
+      {optionalModels.length > 0 && (
+        <section aria-labelledby="optional-models-heading" className="mt-6">
+          <div className="mb-3 flex items-baseline justify-between gap-4">
+            <h2
+              id="optional-models-heading"
+              className="text-sm font-semibold tracking-tight text-[#F1F5F9]"
+            >
+              Дополнительные модели (Быстрая 5B и апскейл 1080p)
+            </h2>
+            <span className="font-mono text-xs tabular-nums text-[#64748B]">
+              {optionalModels.length} файла · по желанию
+            </span>
+          </div>
+
+          <ul className="divide-y divide-[#1E2330] rounded-lg border border-[#222734] bg-[#10141C]">
+            {optionalModels.map((model) => {
+              const live = progressById[model.id];
+              const isDownloading = live?.state === 'downloading';
+              const isQueued = live?.state === 'queued';
+              const isError = live?.state === 'error';
+              const isInstalled = model.status === 'installed' && !isDownloading && !isQueued;
+              const isPartial =
+                !isInstalled && !isDownloading && !isQueued && model.status === 'partial';
+              const isMismatch =
+                !isInstalled && !isDownloading && !isQueued && model.status === 'size_mismatch';
+              const isRequiredForCurrent = requiredSet.has(model.id) && !isInstalled;
+              const progressPct = isDownloading
+                ? (live.percent ?? 0)
+                : isPartial && model.expectedSizeBytes > 0
+                  ? Number(((model.partialSizeBytes / model.expectedSizeBytes) * 100).toFixed(1))
+                  : 0;
+
+              return (
+                <li
+                  key={model.id}
+                  className={`px-4 py-4 sm:px-5 ${isRequiredForCurrent ? 'bg-[#171B26]' : ''}`}
+                >
+                  <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                        <h3 className="text-sm font-semibold text-[#F1F5F9]">{model.name}</h3>
+                        <span className="font-mono text-[11px] text-[#64748B]" aria-hidden="true">
+                          ·
+                        </span>
+                        <span className="font-mono text-[11px] text-[#94A3B8]">
+                          {model.category}
+                        </span>
+                        {isRequiredForCurrent && (
+                          <span className="text-[11px] font-medium text-[#F6AD55]">
+                            · Требуется для текущей генерации
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs leading-relaxed text-[#94A3B8]">{model.description}</p>
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] tabular-nums text-[#64748B]">
+                        <span className="text-[#CBD5E1]">{model.targetSubfolder}/</span>
+                        <span className="break-all text-[#94A3B8]">{model.filename}</span>
+                        <span aria-hidden="true">·</span>
+                        <span className="text-[#CBD5E1]">
+                          {formatBytes(model.expectedSizeBytes)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex shrink-0 items-center justify-between gap-3 sm:flex-col sm:items-end">
+                      <span
+                        className={`text-xs font-medium ${
+                          isInstalled
+                            ? 'text-[#22C55E]'
+                            : isDownloading || isQueued || isPartial
+                              ? 'text-[#F6AD55]'
+                              : isError || isMismatch
+                                ? 'text-[#F87171]'
+                                : 'text-[#94A3B8]'
+                        }`}
+                      >
+                        {isInstalled
+                          ? 'Установлена'
+                          : isDownloading
+                            ? `${progressPct.toFixed(0)}%`
+                            : isQueued
+                              ? 'В очереди'
+                              : isPartial
+                                ? 'Докачка'
+                                : 'Не установлена'}
+                      </span>
+
+                      {isInstalled ? (
+                        <div className="inline-flex items-center gap-1.5 font-mono text-[11px] text-[#4ADE80]">
+                          <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Готово</span>
+                        </div>
+                      ) : isDownloading ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleCancelDownload(model.id)}
+                          className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#7F1D1D] bg-[#2A1215] px-3 py-1.5 text-xs font-medium text-[#FCA5A5] hover:bg-[#3A191D]"
+                        >
+                          <Square className="h-3 w-3 fill-current" aria-hidden="true" />
+                          <span>Пауза</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={isDownloadingQueue || !dirInput.trim()}
+                          onClick={() => void handleStartDownload([model.id])}
+                          className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#2B3242] bg-[#1A1F2B] px-3 py-1.5 text-xs font-medium text-[#E2E8F0] transition-colors hover:border-[#E58E26]/60 hover:bg-[#222838] disabled:cursor-not-allowed disabled:opacity-45"
+                        >
+                          <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>{isPartial ? 'Докачать' : 'Скачать'}</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {isError && live?.error && (
+                    <p className="mt-2.5 text-xs text-[#FCA5A5]">{live.error}</p>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
 
       {/* ComfyUI Video Export Nodes Info */}
       <section

@@ -223,4 +223,47 @@ test('runPreflight tolerates HTTP 400 on unknown VHS_VideoCombine and extracts S
   assert.equal(report?.coreVideoCodec, 'auto');
 });
 
+test('analyzePreflight checks RIFE VFI ckpt_name when frame interpolation is enabled', () => {
+  const rifeSettings: GenerationSettings = {
+    ...settings,
+    durationSec: 5,
+    rifeEnabled: true,
+  };
+  const graphs = buildPreflightGraphs({
+    settings: rifeSettings,
+    hasStartFrame: false,
+    isContinuation: false,
+  });
+
+  const missingRifeCkpt = analyzePreflight(
+    graphs,
+    fullObjectInfo({
+      'RIFE VFI': {
+        input: {
+          required: {
+            ckpt_name: combo('rife47.pth'),
+          },
+        },
+      },
+    }),
+  );
+  assert.equal(missingRifeCkpt.ok, false);
+  assert.ok(missingRifeCkpt.missingFiles.some((f) => f.value === 'rife49.pth'));
+
+  const okRife = analyzePreflight(
+    graphs,
+    fullObjectInfo({
+      'RIFE VFI': {
+        input: {
+          required: {
+            ckpt_name: combo('rife49.pth'),
+          },
+        },
+      },
+    }),
+  );
+  assert.equal(okRife.ok, true);
+});
+
+
 

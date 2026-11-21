@@ -15,6 +15,16 @@ export interface ElectronFilmBridge {
   isElectron: boolean;
   checkFfmpeg: () => Promise<{ ffmpegPath: string | null }>;
   mergeSegments: (segmentUrls: string[], suggestedName: string) => Promise<FilmMergeResult>;
+  extractLastFrame?: (videoUrl: string) => Promise<{
+    ok: boolean;
+    pngBase64?: string;
+    code?: 'FFMPEG_NOT_FOUND';
+    error?: string;
+  }>;
+  archiveClip?: (
+    videoUrl: string,
+    filename?: string,
+  ) => Promise<{ ok: boolean; localPath?: string; error?: string }>;
   showFile: (filePath: string) => Promise<{ ok: boolean }>;
   onProgress: (callback: (event: FilmMergeProgress) => void) => () => void;
 }

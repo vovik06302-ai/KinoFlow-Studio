@@ -19,6 +19,10 @@ import {
   getShootingStyleOption,
 } from '../services/comfyService';
 import type { PreflightReport } from '../services/preflightService';
+import {
+  resolveHistoryItemDownload,
+  triggerVideoDownload,
+} from '../utils/videoDownload';
 import { mergeVideoSegments } from '../utils/videoFrameUtils';
 import type { FilmMergeProgress } from '../types/film';
 import type {
@@ -80,42 +84,30 @@ export function PreviewAndHistoryPanel({
   const [mergeNotice, setMergeNotice] = useState<string | null>(null);
   const [mergeProgress, setMergeProgress] = useState<FilmMergeProgress | null>(null);
   const [savedFilmPath, setSavedFilmPath] = useState<string | null>(null);
+  const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
 
   const segments = activeVideo?.segments && activeVideo.segments.length > 0 ? activeVideo.segments : null;
   const activeSegment = segments
     ? segments[Math.min(selectedSegmentIndex, segments.length - 1)]
     : null;
-  const currentVideoSrc = activeSegment ? activeSegment.videoUrl : activeVideo?.videoUrl ?? '';
-  const currentFilename = activeSegment ? activeSegment.filename : activeVideo?.filename ?? 'video.mp4';
+  const activeDownloadTarget = resolveHistoryItemDownload(
+    activeVideo,
+    segments ? selectedSegmentIndex : undefined,
+  );
+  const currentVideoSrc = activeDownloadTarget?.url ?? '';
 
   useEffect(() => {
     setSelectedSegmentIndex(0);
     setMergeError(null);
   }, [activeVideo?.id]);
 
-  const handleDownload = async (url: string, filename: string) => {
+  const handleDownload = async (url: string, filename: string, key: string) => {
+    if (!url || downloadingKey === key) return;
+    setDownloadingKey(key);
     try {
-      const response = await fetch(url, { mode: 'cors' });
-      if (!response.ok) {
-        throw new Error('direct');
-      }
-      const blob = await response.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = blobUrl;
-      link.download = filename.endsWith('.mp4') ? filename : `${filename}.mp4`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1500);
-    } catch {
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = filename;
-      link.rel = 'noopener noreferrer';
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+      await triggerVideoDownload(url, filename);
+    } finally {
+      setDownloadingKey((curr) => (curr === key ? null : curr));
     }
   };
 
@@ -275,14 +267,25 @@ export function PreviewAndHistoryPanel({
                 <span>Прервать задачу</span>
               </button>
             ) : (
-              activeVideo && (
+              activeVideo && activeDownloadTarget && (
                 <button
                   type="button"
-                  onClick={() => void handleDownload(currentVideoSrc, currentFilename)}
-                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#2B3242] bg-[#1A1F2B] px-3.5 py-1.5 text-xs font-medium text-[#E2E8F0] transition-colors hover:border-[#3A4358] hover:bg-[#222838] focus-visible:outline-2 focus-visible:outline-[#E58E26]"
+                  disabled={downloadingKey === `active-${activeVideo.id}`}
+                  onClick={() =>
+                    void handleDownload(
+                      activeDownloadTarget.url,
+                      activeDownloadTarget.filename,
+                      `active-${activeVideo.id}`,
+                    )
+                  }
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#2B3242] bg-[#1A1F2B] px-3.5 py-1.5 text-xs font-medium text-[#E2E8F0] transition-colors hover:border-[#3A4358] hover:bg-[#222838] focus-visible:outline-2 focus-visible:outline-[#E58E26] disabled:opacity-50"
                 >
-                  <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Скачать .mp4</span>
+                  {downloadingKey === `active-${activeVideo.id}` ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                  )}
+                  <span>Скачать видео</span>
                 </button>
               )
             )}
@@ -392,7 +395,7 @@ export function PreviewAndHistoryPanel({
                         <> · Режим: {progress.segmentMode === 'i2v' ? 'I2V' : 'T2V'}</>
                       )}
                       {progress.identityAnchorCount && progress.identityAnchorCount > 0 ? (
-                        <> · Защита лиц: {progress.identityAnchorCount} реф. (0.75–0.85)</>
+                        <> · Портрет персонажа (I2V)</>
                       ) : null}
                     </span>
                     {progress.promptId && (
@@ -493,7 +496,7 @@ export function PreviewAndHistoryPanel({
                   <p className="mt-0.5 text-[11px] text-[#94A3B8]">
                     Текущая сцена: <span className="font-mono tabular-nums text-[#CBD5E1]">{activeVideo.durationSec} сек</span>
                     {segments && segments.length > 1 ? ` (${segments.length} сегм.)` : ''} ·
-                    последний кадр + исходные референсы лиц (вес 0.75–0.85)
+                    последний кадр клипа автоматически передаётся в I2V
                   </p>
                 </div>
 
@@ -619,13 +622,27 @@ export function PreviewAndHistoryPanel({
                     <>
                       <span aria-hidden="true">·</span>
                       <span>
-                        Персонажи:{' '}
-                        {activeVideo.characters
-                          .map((c) => `${c.name} (${c.weight.toFixed(2)})`)
-                          .join(', ')}
+                        Персонаж: {activeVideo.characters.map((c) => c.name).join(', ')}
                       </span>
                     </>
                   )}
+                  {(activeSegment?.localFilePath || activeVideo.localFilePath) &&
+                    window.kinoflowFilm && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void window.kinoflowFilm?.showFile(
+                              (activeSegment?.localFilePath || activeVideo.localFilePath) as string,
+                            )
+                          }
+                          className="text-[#F6AD55] underline-offset-2 hover:underline"
+                        >
+                          Локальная копия в папке
+                        </button>
+                      </>
+                    )}
                 </div>
               </div>
             </div>
@@ -786,7 +803,7 @@ export function PreviewAndHistoryPanel({
                     </div>
                   </button>
 
-                  <div className="flex shrink-0 items-center gap-1">
+                  <div className="flex shrink-0 items-center gap-1.5">
                     <button
                       type="button"
                       onClick={() => onRestoreHistoryItem(item)}
@@ -796,15 +813,33 @@ export function PreviewAndHistoryPanel({
                     >
                       <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleDownload(item.videoUrl, item.filename)}
-                      aria-label={`Скачать ${item.filename}`}
-                      title="Скачать .mp4"
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-md text-[#94A3B8] transition-colors hover:bg-[#222838] hover:text-[#F1F5F9] focus-visible:outline-2 focus-visible:outline-[#E58E26]"
-                    >
-                      <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
+                    {(() => {
+                      const itemDownload = resolveHistoryItemDownload(item);
+                      const isItemDownloading = downloadingKey === `history-${item.id}`;
+                      return (
+                        <button
+                          type="button"
+                          disabled={!itemDownload || isItemDownloading}
+                          onClick={() => {
+                            if (!itemDownload) return;
+                            void handleDownload(
+                              itemDownload.url,
+                              itemDownload.filename,
+                              `history-${item.id}`,
+                            );
+                          }}
+                          title="Сохранить видео локально"
+                          className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#2B3242] bg-[#1A1F2B] px-2.5 py-1.5 text-xs font-medium text-[#E2E8F0] transition-colors hover:border-[#3A4358] hover:bg-[#222838] focus-visible:outline-2 focus-visible:outline-[#E58E26] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {isItemDownloading ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                          ) : (
+                            <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                          )}
+                          <span>Скачать видео</span>
+                        </button>
+                      );
+                    })()}
                     <button
                       type="button"
                       onClick={() => onDeleteHistoryItem(item.id)}

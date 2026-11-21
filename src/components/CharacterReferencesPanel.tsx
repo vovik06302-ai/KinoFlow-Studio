@@ -12,11 +12,9 @@ interface CharacterReferencesPanelProps {
   onRemoveCharacter: (id: string) => void;
 }
 
-const DEFAULT_NAME_PLACEHOLDERS = ['Марина', 'Владимир', 'Алексей'];
-
 export function CharacterReferencesPanel({
   characters,
-  maxCharacters = 3,
+  maxCharacters = 1,
   disabled,
   onAddFiles,
   onUpdateCharacter,
@@ -55,7 +53,7 @@ export function CharacterReferencesPanel({
           id="characters-heading"
           className="text-sm font-semibold tracking-tight text-[#F1F5F9]"
         >
-          Референсы персонажей
+          Портрет персонажа (I2V-якорь)
         </h2>
         <span className="font-mono text-xs tabular-nums text-[#94A3B8]">
           {characters.length} / {maxCharacters} · стартовый кадр
@@ -81,7 +79,6 @@ export function CharacterReferencesPanel({
             id="character-upload-input"
             type="file"
             accept="image/png,image/jpeg,image/webp"
-            multiple
             tabIndex={-1}
             aria-hidden="true"
             disabled={disabled}
@@ -95,11 +92,10 @@ export function CharacterReferencesPanel({
               </div>
               <div>
                 <p className="text-xs font-medium text-[#E2E8F0]">
-                  Перетащите фото персонажей сюда
+                  Перетащите фото персонажа сюда
                 </p>
                 <p className="text-[11px] text-[#64748B]">
-                  PNG, JPG или WebP · ещё {remainingSlots}{' '}
-                  {remainingSlots === 1 ? 'слот' : 'слота'}
+                  PNG, JPG или WebP · автоматически запустит I2V
                 </p>
               </div>
             </div>
@@ -117,29 +113,28 @@ export function CharacterReferencesPanel({
 
       {characters.length === 0 ? (
         <p className="text-xs leading-relaxed text-[#64748B]">
-          Загрузите портрет персонажа: первое фото станет стартовым кадром сцены (режим I2V),
-          а имена сохранятся при улучшении промпта.
+          Загрузите портрет персонажа: фото станет стартовым кадром сцены Wan 2.2 I2V, а указанное
+          имя автоматически сохранится в промпте.
         </p>
       ) : (
         <ul className="divide-y divide-[#1E2330]" data-testid="character-list">
-          {characters.map((char, index) => {
-            const placeholder = DEFAULT_NAME_PLACEHOLDERS[index] ?? `Персонаж ${index + 1}`;
-            const displayName = char.name.trim() || placeholder;
+          {characters.map((char) => {
+            const displayName = char.name.trim() || 'Персонаж';
             return (
-              <li key={char.id} className="flex items-start gap-3.5 py-3.5 first:pt-1 last:pb-0">
+              <li key={char.id} className="flex items-start gap-3.5 py-2">
                 <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-md border border-[#262C3A] bg-[#141821]">
                   <img
                     src={char.previewUrl}
-                    alt={`Референс персонажа ${displayName}`}
+                    alt={`Портрет персонажа ${displayName}`}
                     referrerPolicy="no-referrer"
                     className="h-full w-full object-cover"
                   />
                 </div>
 
-                <div className="min-w-0 flex-1 space-y-2.5">
+                <div className="min-w-0 flex-1 space-y-2">
                   <div className="flex items-center gap-2">
                     <label htmlFor={`char-name-${char.id}`} className="sr-only">
-                      Имя персонажа {index + 1}
+                      Имя персонажа
                     </label>
                     <input
                       id={`char-name-${char.id}`}
@@ -147,44 +142,22 @@ export function CharacterReferencesPanel({
                       value={char.name}
                       disabled={disabled}
                       onChange={(e) => onUpdateCharacter(char.id, { name: e.target.value })}
-                      placeholder={`Имя (например, ${placeholder})`}
+                      placeholder="Имя персонажа (например, Марина)"
                       className="min-w-0 flex-1 rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 text-xs font-medium text-[#F1F5F9] placeholder-[#475569] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
                     />
                     <button
                       type="button"
                       disabled={disabled}
                       onClick={() => onRemoveCharacter(char.id)}
-                      aria-label={`Удалить референс «${displayName}»`}
+                      aria-label={`Удалить портрет «${displayName}»`}
                       className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-transparent text-[#64748B] transition-colors hover:border-[#3B1F24] hover:bg-[#2A1519] hover:text-[#F87171] focus-visible:outline-2 focus-visible:outline-[#E58E26] disabled:opacity-50"
                     >
                       <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>
                   </div>
-
-                  <div className="flex items-center gap-3">
-                    <label
-                      htmlFor={`char-weight-${char.id}`}
-                      className="shrink-0 text-[11px] text-[#94A3B8]"
-                    >
-                      Вес (для цепочки сегментов)
-                    </label>
-                    <input
-                      id={`char-weight-${char.id}`}
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      value={char.weight}
-                      disabled={disabled}
-                      onChange={(e) =>
-                        onUpdateCharacter(char.id, { weight: Number(e.target.value) })
-                      }
-                      className="h-1.5 flex-1 cursor-pointer appearance-none rounded-sm bg-[#262C3A] accent-[#E58E26] disabled:opacity-50"
-                    />
-                    <span className="w-9 text-right font-mono text-xs tabular-nums text-[#E2E8F0]">
-                      {char.weight.toFixed(2)}
-                    </span>
-                  </div>
+                  <p className="text-[11px] text-[#94A3B8]">
+                    Используется как стартовый кадр I2V (узел LoadImage) и имя персонажа в промпте.
+                  </p>
                 </div>
               </li>
             );

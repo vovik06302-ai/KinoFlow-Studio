@@ -17,6 +17,7 @@ export interface RequiredModelDefinition {
   repoId: string;
   downloadUrl: string;
   expectedSizeBytes: number;
+  optional?: boolean;
 }
 
 export interface ScannedModelItem extends RequiredModelDefinition {

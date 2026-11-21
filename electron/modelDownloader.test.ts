@@ -14,7 +14,7 @@ import {
 } from './modelCatalog.js';
 import { ModelDownloadManager, scanModelsDirectory } from './modelDownloader.js';
 
-test('REQUIRED_MODELS includes official Wan 2.2 T2V/I2V FP8, UMT5-XXL FP8, and Wan 2.1 VAE without unused CLIP Vision', () => {
+test('REQUIRED_MODELS includes official Wan 2.2 T2V/I2V FP8, UMT5-XXL FP8, Wan 2.1 VAE, plus optional 5B and 4x-UltraSharp models', () => {
   const filenames = REQUIRED_MODELS.map((m) => m.filename);
   assert.ok(filenames.includes('wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors'));
   assert.ok(filenames.includes('wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors'));
@@ -22,13 +22,21 @@ test('REQUIRED_MODELS includes official Wan 2.2 T2V/I2V FP8, UMT5-XXL FP8, and W
   assert.ok(filenames.includes('wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors'));
   assert.ok(filenames.includes('umt5_xxl_fp8_e4m3fn_scaled.safetensors'));
   assert.ok(filenames.includes('wan_2.1_vae.safetensors'));
+  assert.ok(filenames.includes('wan2.2_ti2v_5B_fp16.safetensors'));
+  assert.ok(filenames.includes('wan2.2_vae.safetensors'));
+  assert.ok(filenames.includes('4x-UltraSharp.pth'));
   assert.ok(!filenames.includes('clip_vision_h.safetensors'));
 
   for (const model of REQUIRED_MODELS) {
-    assert.ok(model.downloadUrl.startsWith('https://huggingface.co/Comfy-Org/'));
-    assert.ok(model.expectedSizeBytes > 100_000_000);
+    assert.ok(model.downloadUrl.startsWith('https://huggingface.co/'));
+    assert.ok(model.expectedSizeBytes > 50_000_000);
     assert.ok(model.targetSubfolder.startsWith('models/'));
   }
+
+  const coreModels = REQUIRED_MODELS.filter((m) => !m.optional);
+  const optionalModels = REQUIRED_MODELS.filter((m) => m.optional);
+  assert.equal(coreModels.length, 6);
+  assert.equal(optionalModels.length, 3);
 });
 
 test('evaluateModelFileStatus detects installed, size_mismatch, partial, missing, and tolerates minor metadata drift on large models', () => {
@@ -150,3 +158,46 @@ test('ModelDownloadManager supports HTTP Range 206 resume and transitions status
     await fsp.rm(tmpComfyDir, { recursive: true, force: true });
   }
 });
+
+test('ModelDownloadManager skips optional models on default queue unless explicitly requested', async () => {
+  const tmpComfyDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'kinoflow-opt-test-'));
+  try {
+    const testCatalog = [
+      {
+        id: 'core-item',
+        name: 'Core Item',
+        category: 'VAE',
+        description: 'Core',
+        filename: 'core.bin',
+        targetSubfolder: 'models/vae',
+        repoId: 'test/repo',
+        downloadUrl: 'http://127.0.0.1:1/core.bin',
+        expectedSizeBytes: 4,
+      },
+      {
+        id: 'opt-item',
+        name: 'Optional Item',
+        category: 'Upscale',
+        description: 'Optional',
+        filename: 'opt.bin',
+        targetSubfolder: 'models/upscale_models',
+        repoId: 'test/repo',
+        downloadUrl: 'http://127.0.0.1:1/opt.bin',
+        expectedSizeBytes: 4,
+        optional: true,
+      },
+    ];
+
+    // Mark core as already installed, leave optional missing
+    await fsp.mkdir(path.join(tmpComfyDir, 'models', 'vae'), { recursive: true });
+    await fsp.writeFile(path.join(tmpComfyDir, 'models', 'vae', 'core.bin'), Buffer.from('1234'));
+
+    const manager = new ModelDownloadManager(testCatalog);
+    const defaultStart = await manager.startQueue(tmpComfyDir);
+    assert.equal(defaultStart.started, false);
+    assert.deepEqual(defaultStart.queue, []);
+  } finally {
+    await fsp.rm(tmpComfyDir, { recursive: true, force: true });
+  }
+});
+

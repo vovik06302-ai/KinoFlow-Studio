@@ -1,15 +1,18 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 /**
- * Starts a portable ComfyUI from its folder (run_nvidia_gpu.bat) and streams its console
- * output so KinoFlow Studio can show the log and wait until the server answers.
+ * Starts a portable ComfyUI (.bat) or ComfyUI Desktop (ComfyUI.exe) from its folder and streams
+ * console output so KinoFlow Studio can show the log and wait until the server answers.
  */
 
 export const LAUNCH_SCRIPT_NAMES = [
   'run_nvidia_gpu.bat',
   'run_nvidia_gpu_fast_fp16_accumulation.bat',
+  'ComfyUI.exe',
+  'run_cpu.bat',
 ];
 
 /**
@@ -28,7 +31,7 @@ export function buildComfyLaunchEnv(baseEnv = process.env) {
   };
 }
 
-/** The .bat lives next to the `ComfyUI` folder, so the folder itself and two parents are checked. */
+/** The .bat or .exe lives next to or inside the `ComfyUI` folder; checks the folder and two parents. */
 export function findLaunchScript(comfyDir, fsImpl = fs) {
   if (typeof comfyDir !== 'string' || !comfyDir.trim()) return null;
   const start = comfyDir.trim();
@@ -41,6 +44,42 @@ export function findLaunchScript(comfyDir, fsImpl = fs) {
       } catch {
         // keep looking
       }
+    }
+  }
+  return null;
+}
+
+/**
+ * Probes standard Windows ComfyUI Portable and Desktop installation directories and returns
+ * the first existing folder (preferring folders that contain a launch script or `models/`).
+ */
+export function detectComfyDirectory({
+  env = process.env,
+  homedir = os.homedir(),
+  fsImpl = fs,
+} = {}) {
+  const localAppData = env.LOCALAPPDATA || path.join(homedir, 'AppData', 'Local');
+  const candidates = [
+    'C:\\ComfyUI_windows_portable\\ComfyUI',
+    'D:\\ComfyUI_windows_portable\\ComfyUI',
+    'E:\\ComfyUI_windows_portable\\ComfyUI',
+    path.join(homedir, 'Documents', 'ComfyUI'),
+    path.join(localAppData, 'Programs', '@comfyorgcomfyui-electron'),
+    'C:\\ComfyUI',
+  ];
+
+  for (const dir of candidates) {
+    try {
+      if (fsImpl.statSync(dir).isDirectory()) {
+        if (findLaunchScript(dir, fsImpl)) return dir;
+        try {
+          if (fsImpl.statSync(path.join(dir, 'models')).isDirectory()) return dir;
+        } catch {
+          // continue checking
+        }
+      }
+    } catch {
+      // keep looking
     }
   }
   return null;
@@ -110,7 +149,10 @@ export class ComfyLauncher {
       return { ok: false, error: 'ComfyUI уже запущен из KinoFlow Studio.' };
     }
     if (!scriptPath) {
-      return { ok: false, error: 'Не найден run_nvidia_gpu.bat в указанной папке ComfyUI.' };
+      return {
+        ok: false,
+        error: 'Не найден run_nvidia_gpu.bat или ComfyUI.exe в указанной папке ComfyUI.',
+      };
     }
     if (this.platform !== 'win32') {
       return { ok: false, error: 'Запуск ComfyUI из приложения поддерживается только в Windows.' };
@@ -120,11 +162,15 @@ export class ComfyLauncher {
     this.partial = { stdout: '', stderr: '' };
     this.scriptPath = scriptPath;
 
+    const isExe = /\.exe$/i.test(scriptPath);
+    const command = isExe ? scriptPath : 'cmd.exe';
+    const args = isExe ? [] : ['/c', path.basename(scriptPath)];
+
     let child;
     try {
-      child = this.spawnImpl('cmd.exe', ['/c', path.basename(scriptPath)], {
+      child = this.spawnImpl(command, args, {
         cwd: path.dirname(scriptPath),
-        windowsHide: true,
+        windowsHide: !isExe,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: buildComfyLaunchEnv(this.baseEnv),
       });

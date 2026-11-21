@@ -4,7 +4,15 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { buildMergeArgs, findFfmpeg, isHttpUrl, mergeSegments } from './filmMerger.js';
+import {
+  archiveVideoClip,
+  buildExtractLastFrameArgs,
+  buildMergeArgs,
+  extractLastFrameWithFfmpeg,
+  findFfmpeg,
+  isHttpUrl,
+  mergeSegments,
+} from './filmMerger.js';
 
 function makeSpawn(exitCode: number, calls: Array<{ command: string; args: string[] }> = []) {
   return (command: string, args: string[]) => {
@@ -114,3 +122,51 @@ test('mergeSegments reports FFMPEG_NOT_FOUND, rejects bad URLs and surfaces ffmp
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('buildExtractLastFrameArgs, extractLastFrameWithFfmpeg, and archiveVideoClip work offline with cleanup', async () => {
+  const args = buildExtractLastFrameArgs({ inputPath: 'clip.mp4', outputPath: 'last.png' });
+  assert.ok(args.includes('-sseof'));
+  assert.ok(args.includes('-frames:v'));
+  assert.equal(args[args.length - 1], 'last.png');
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kf-frame-test-'));
+  try {
+    const fakePng = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    const spawnImpl = (_cmd: string, spawnArgs: string[]) => {
+      const outPath = spawnArgs[spawnArgs.length - 1];
+      fs.writeFileSync(outPath, fakePng);
+      const child = new EventEmitter() as EventEmitter & { stderr: EventEmitter };
+      child.stderr = new EventEmitter();
+      setImmediate(() => child.emit('close', 0));
+      return child;
+    };
+
+    const extracted = await extractLastFrameWithFfmpeg({
+      videoUrl: 'http://127.0.0.1:8188/view?filename=seg1.mp4',
+      ffmpegPath: 'ffmpeg',
+      tempRoot: root,
+      spawnImpl,
+      downloadImpl: async ({ destPath }: { destPath: string }) => {
+        fs.writeFileSync(destPath, 'mp4-bytes');
+      },
+    });
+    assert.equal(extracted.pngBase64, fakePng.toString('base64'));
+    assert.deepEqual(fs.readdirSync(root), [], 'frame extraction temp dir must be removed');
+
+    const archiveDir = path.join(root, 'archive');
+    const archived = await archiveVideoClip({
+      videoUrl: 'http://127.0.0.1:8188/view?filename=seg1.mp4',
+      archiveDir,
+      filename: 'my scene (1).mp4',
+      downloadImpl: async ({ destPath }: { destPath: string }) => {
+        fs.writeFileSync(destPath, 'archived-mp4');
+      },
+    });
+    assert.equal(path.dirname(archived.localPath), archiveDir);
+    assert.match(path.basename(archived.localPath), /^my_scene_1_\.mp4$/);
+    assert.equal(fs.readFileSync(archived.localPath, 'utf8'), 'archived-mp4');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+

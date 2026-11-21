@@ -50,6 +50,10 @@ contextBridge.exposeInMainWorld('kinoflowFilm', {
   checkFfmpeg: () => ipcRenderer.invoke('film:check-ffmpeg'),
   mergeSegments: (segmentUrls, suggestedName) =>
     ipcRenderer.invoke('film:merge', { segmentUrls, suggestedName }),
+  extractLastFrame: (videoUrl) =>
+    ipcRenderer.invoke('film:extract-last-frame', { videoUrl }),
+  archiveClip: (videoUrl, filename) =>
+    ipcRenderer.invoke('film:archive-clip', { videoUrl, filename }),
   showFile: (filePath) => ipcRenderer.invoke('film:show-file', filePath),
   onProgress: (callback) => {
     const listener = (_event, payload) => {
@@ -65,6 +69,7 @@ contextBridge.exposeInMainWorld('kinoflowFilm', {
 contextBridge.exposeInMainWorld('kinoflowLauncher', {
   isElectron: true,
   getState: () => ipcRenderer.invoke('comfy:launcher-state'),
+  detectDir: () => ipcRenderer.invoke('comfy:launcher-detect'),
   start: (comfyDir) => ipcRenderer.invoke('comfy:launcher-start', comfyDir),
   stop: () => ipcRenderer.invoke('comfy:launcher-stop'),
   onEvent: (callback) => {
