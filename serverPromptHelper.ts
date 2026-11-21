@@ -202,6 +202,8 @@ export interface EnhancePromptRetryOptions {
   retryDelayMs?: number;
   /** Сколько раз пробовать каждую модель. По умолчанию 2. */
   attemptsPerModel?: number;
+  /** Подмена функции ожидания (для тестов). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -225,6 +227,7 @@ export async function enhancePromptWithRetry(
   const models = options.models ?? ENHANCE_PROMPT_MODELS;
   const attemptsPerModel = options.attemptsPerModel ?? 2;
   const retryDelayMs = options.retryDelayMs ?? 800;
+  const wait = options.sleep ?? sleep;
   let lastError: unknown = new Error('Не удалось улучшить промпт.');
 
   for (const model of models) {
@@ -244,7 +247,7 @@ export async function enhancePromptWithRetry(
         lastError = error;
         if (!isTransientGeminiError(error)) break; // неисправимая ошибка — пробуем следующую модель
         if (attempt < attemptsPerModel - 1) {
-          await sleep(retryDelayMs * (attempt + 1));
+          await wait(retryDelayMs);
         }
       }
     }
