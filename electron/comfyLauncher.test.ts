@@ -18,6 +18,7 @@ import {
   readLogFileDelta,
   resolveComfyRootDir,
   validateInstanceLaunch,
+  buildPortablePythonEnv,
 } from './comfyLauncher.js';
 
 type FakeChild = EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; pid: number };
@@ -498,3 +499,49 @@ test('two ComfyLauncher instances are independent: stopping one does not affect 
 
 
 
+
+test('buildPortablePythonEnv removes variables of other Python installs but keeps the rest', () => {
+  const env = buildPortablePythonEnv({
+    PATH: 'C:\\Windows',
+    PYTHONHOME: 'C:\\Python312',
+    pythonpath: 'C:\\other\\libs',
+    VIRTUAL_ENV: 'C:\\venv',
+    USERPROFILE: 'C:\\Users\\User',
+  });
+  assert.equal(env.PYTHONHOME, undefined);
+  assert.equal(env.pythonpath, undefined);
+  assert.equal(env.VIRTUAL_ENV, undefined);
+  assert.equal(env.PATH, 'C:\\Windows');
+  assert.equal(env.USERPROFILE, 'C:\\Users\\User');
+  assert.equal(env.PYTHONUTF8, '1');
+  assert.equal(env.PYTHONUNBUFFERED, '1');
+});
+
+test('stripAnsi removes ComfyUI colour codes from log lines', async () => {
+  const { stripAnsi } = await import('./comfyLauncher.js');
+  assert.equal(stripAnsi('\u001b[32m[INFO]\u001b[0m Starting server'), '[INFO] Starting server');
+  assert.equal(stripAnsi('\u001b[1m\u001b[31m[ERROR]\u001b[0m boom'), '[ERROR] boom');
+  assert.equal(stripAnsi('plain'), 'plain');
+});
+
+test('--disable-assets is added only when this ComfyUI knows the flag, so instances do not share a locked database', async () => {
+  const { supportsDisableAssets, withDatabaseLockGuard } = await import('./comfyLauncher.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kf-assets-'));
+  try {
+    const base = ['-s', 'ComfyUI\\main.py', '--windows-standalone-build', '--cuda-device', '1', '--port', '8189'];
+    assert.equal(supportsDisableAssets(root), false, 'no cli_args.py -> do not risk an unknown flag');
+    assert.deepEqual(withDatabaseLockGuard(base, root), base);
+
+    fs.mkdirSync(path.join(root, 'ComfyUI', 'comfy'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'ComfyUI', 'comfy', 'cli_args.py'), 'parser.add_argument("--disable-assets", action="store_true")');
+    assert.equal(supportsDisableAssets(root), true);
+    assert.deepEqual(withDatabaseLockGuard(base, root), [...base, '--disable-assets']);
+    assert.deepEqual(withDatabaseLockGuard([...base, '--disable-assets'], root), [...base, '--disable-assets']);
+    assert.deepEqual(
+      withDatabaseLockGuard([...base, '--database-url', 'sqlite:///x.db'], root),
+      [...base, '--database-url', 'sqlite:///x.db'],
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

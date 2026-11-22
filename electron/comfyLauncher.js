@@ -42,9 +42,28 @@ export function buildComfyLaunchEnv(baseEnv = process.env) {
 /**
  * Environment overrides for direct Portable `python.exe` launches with file-backed stdio.
  */
+/**
+ * Variables of another Python installation that make the embedded interpreter of ComfyUI Portable
+ * pick the wrong standard library or site-packages and crash on startup. The portable bundle is
+ * self-contained, so they are removed (the user's own shell is never affected).
+ */
+export const FOREIGN_PYTHON_ENV_VARS = [
+  'PYTHONHOME',
+  'PYTHONPATH',
+  'PYTHONSTARTUP',
+  'PYTHONEXECUTABLE',
+  'VIRTUAL_ENV',
+];
+
 export function buildPortablePythonEnv(baseEnv = process.env) {
+  const cleaned = { ...baseEnv };
+  for (const name of Object.keys(cleaned)) {
+    if (FOREIGN_PYTHON_ENV_VARS.includes(name.toUpperCase())) {
+      delete cleaned[name];
+    }
+  }
   return {
-    ...baseEnv,
+    ...cleaned,
     PYTHONUNBUFFERED: '1',
     PYTHONUTF8: '1',
     PYTHONIOENCODING: 'utf-8',
@@ -53,6 +72,39 @@ export function buildPortablePythonEnv(baseEnv = process.env) {
     NO_COLOR: '1',
     TERM: 'dumb',
   };
+}
+
+/** Removes ANSI colour/cursor escape sequences that ComfyUI writes into its log. */
+export function stripAnsi(text) {
+  // eslint-disable-next-line no-control-regex
+  return String(text).replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '');
+}
+
+/**
+ * ComfyUI 0.4x keeps an "assets" database in one SQLite file, so two ComfyUI processes sharing
+ * the same folder cannot both start ("Another ComfyUI is already using this database",
+ * ASSETS_STARTUP_FAILED: in_use). The flag `--disable-assets` avoids the lock, but older builds
+ * do not know it and would refuse to start, so it is only used when this ComfyUI declares it.
+ */
+export function supportsDisableAssets(portableRoot, fsImpl = fs) {
+  if (!portableRoot) return false;
+  try {
+    const source = fsImpl.readFileSync(
+      path.join(portableRoot, 'ComfyUI', 'comfy', 'cli_args.py'),
+      'utf-8',
+    );
+    return source.includes('--disable-assets');
+  } catch {
+    return false;
+  }
+}
+
+export function withDatabaseLockGuard(args, portableRoot, fsImpl = fs) {
+  const hasOwnSetting = args.some(
+    (arg) => arg === '--disable-assets' || arg === '--database-url' || arg.startsWith('--database-url='),
+  );
+  if (hasOwnSetting || !supportsDisableAssets(portableRoot, fsImpl)) return args;
+  return [...args, '--disable-assets'];
 }
 
 export const WIN_FLUSH_FIX_NODE_DIR = 'kinoflow_win_flush_fix';
@@ -627,6 +679,7 @@ export class ComfyLauncher {
         partial: '',
         streamPartial: { stdout: '', stderr: '' },
         pollTimer: null,
+        startedAt: null,
         logs: [],
       };
       this.instances.set(id, slot);
@@ -684,8 +737,9 @@ export class ComfyLauncher {
     return states;
   }
 
-  appendLogLine(slot, line) {
-    if (!line || !line.trim()) return;
+  appendLogLine(slot, rawLine) {
+    const line = stripAnsi(rawLine ?? '');
+    if (!line.trim()) return;
     slot.logs.push(line);
     if (slot.logs.length > this.maxLogLines) {
       slot.logs.splice(0, slot.logs.length - this.maxLogLines);
@@ -789,7 +843,11 @@ export class ComfyLauncher {
     }
 
     const pythonExe = path.join(portableRoot, 'python_embeded', 'python.exe');
-    const args = buildPortableLaunchArgs({ batContent, gpuIndex, port });
+    const args = withDatabaseLockGuard(
+      buildPortableLaunchArgs({ batContent, gpuIndex, port }),
+      portableRoot,
+      this.fsImpl,
+    );
     const targetLogsDir = this.resolveLogsDir(logsDir);
     const logPath = path.join(targetLogsDir, `comfyui-${id}.log`);
 
@@ -835,6 +893,7 @@ export class ComfyLauncher {
     }
 
     slot.child = child;
+    slot.startedAt = Date.now();
     slot.pollTimer = setInterval(() => {
       this.pollInstanceLog(id, false);
     }, this.pollIntervalMs);
@@ -850,7 +909,13 @@ export class ComfyLauncher {
       this.pollInstanceLog(id, true);
       this.closeSlotFd(slot);
       slot.child = null;
-      this.emit({ type: 'exit', instanceId: id, code });
+      this.emit({
+        type: 'exit',
+        instanceId: id,
+        code,
+        uptimeMs: slot.startedAt ? Date.now() - slot.startedAt : 0,
+        lastLines: slot.logs.slice(-12),
+      });
     });
 
     this.emit({

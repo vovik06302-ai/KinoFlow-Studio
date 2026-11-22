@@ -22,7 +22,13 @@ export type LauncherEvent =
       port?: number;
       logPath?: string;
     }
-  | { type: 'exit'; instanceId?: string; code: number | null };
+  | {
+      type: 'exit';
+      instanceId?: string;
+      code: number | null;
+      uptimeMs?: number;
+      lastLines?: string[];
+    };
 
 export interface LauncherState {
   instanceId?: string;

@@ -9,6 +9,14 @@ export declare function buildComfyLaunchEnv(
   baseEnv?: Record<string, string | undefined>,
 ): Record<string, string | undefined>;
 
+export declare const FOREIGN_PYTHON_ENV_VARS: string[];
+export declare function stripAnsi(text: string): string;
+export declare function supportsDisableAssets(portableRoot: string | null, fsImpl?: unknown): boolean;
+export declare function withDatabaseLockGuard(
+  args: string[],
+  portableRoot: string | null,
+  fsImpl?: unknown,
+): string[];
 export declare function buildPortablePythonEnv(
   baseEnv?: Record<string, string | undefined>,
 ): Record<string, string | undefined>;
@@ -68,7 +76,13 @@ export type LauncherEvent =
       port?: number;
       logPath?: string;
     }
-  | { type: 'exit'; instanceId: string; code: number | null };
+  | {
+      type: 'exit';
+      instanceId: string;
+      code: number | null;
+      uptimeMs?: number;
+      lastLines?: string[];
+    };
 
 export interface LauncherState {
   instanceId: string;

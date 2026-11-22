@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, Play, ShieldCheck, Square, Terminal } from 'lucide-react';
 import { checkConnection } from '../services/comfyService';
+import {
+  describeLauncherExit,
+  describeStartupStall,
+  isStartupStalled,
+} from '../services/launcherDiagnostics';
 import type { ComfyInstanceId, GpuUsageSnapshot } from '../types/launcher';
 import type { ComfyInstancesSettings, ConnectionStatus } from '../types/video';
 
@@ -21,6 +26,10 @@ interface InstanceUiState {
   logs: string[];
   showLog: boolean;
   error: string;
+  /** When the process was started (ms); used to warn if ComfyUI never answers. */
+  startedAt: number | null;
+  /** True after the user pressed «Остановить», so the exit is not reported as a crash. */
+  stopRequested: boolean;
 }
 
 const INSTANCE_META: Array<{ id: ComfyInstanceId; title: string }> = [
@@ -55,6 +64,8 @@ export function ComfyLauncherPanel({
       logs: [],
       showLog: false,
       error: '',
+      startedAt: null,
+      stopRequested: false,
     },
     '2': {
       running: false,
@@ -63,6 +74,8 @@ export function ComfyLauncherPanel({
       logs: [],
       showLog: false,
       error: '',
+      startedAt: null,
+      stopRequested: false,
     },
   }));
 
@@ -94,6 +107,8 @@ export function ComfyLauncherPanel({
   serverUrlRef.current = serverUrl;
   const instancesConfigRef = useRef(instancesConfig);
   instancesConfigRef.current = instancesConfig;
+  const instancesRef = useRef(instances);
+  instancesRef.current = instances;
 
   // Sync draft inputs if settings changed externally
   useEffect(() => {
@@ -137,6 +152,7 @@ export function ComfyLauncherPanel({
               next[id] = {
                 ...prev[id],
                 running: Boolean(st.running),
+                startedAt: st.running ? Date.now() : null,
                 activePort:
                   typeof st.port === 'number' ? st.port : instancesConfigRef.current[id].port,
                 logs: Array.isArray(st.logs) ? st.logs.slice(-MAX_VISIBLE_LINES) : [],
@@ -196,19 +212,38 @@ export function ComfyLauncherPanel({
             ...prev[targetId],
             running: true,
             online: false,
+            error: '',
+            startedAt: Date.now(),
+            stopRequested: false,
             activePort:
               typeof event.port === 'number' ? event.port : instancesConfigRef.current[targetId].port,
           },
         }));
       } else if (event.type === 'exit') {
-        setInstances((prev) => ({
-          ...prev,
-          [targetId]: {
-            ...prev[targetId],
-            running: false,
-            online: false,
-          },
-        }));
+        setInstances((prev) => {
+          const current = prev[targetId];
+          const crashed = !current.stopRequested;
+          return {
+            ...prev,
+            [targetId]: {
+              ...current,
+              running: false,
+              online: false,
+              startedAt: null,
+              stopRequested: false,
+              showLog: crashed ? true : current.showLog,
+              error: crashed
+                ? describeLauncherExit({
+                    instanceId: targetId,
+                    port: current.activePort,
+                    code: event.code,
+                    uptimeMs: event.uptimeMs ?? 0,
+                    lastLines: event.lastLines ?? current.logs.slice(-12),
+                  })
+                : '',
+            },
+          };
+        });
       }
     });
   }, [bridge]);
@@ -320,6 +355,23 @@ export function ComfyLauncherPanel({
     };
   }, [isWaiting2, activePort2]);
 
+  // Warn when a started instance stays silent for too long (alive process, no answer on its port).
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      for (const { id } of INSTANCE_META) {
+        const st = instancesRef.current[id];
+        if (st.running && !st.online && !st.error && isStartupStalled(st.startedAt, now)) {
+          const message = describeStartupStall(id, st.activePort, st.logs.slice(-12));
+          setInstances((prev) =>
+            prev[id].error ? prev : { ...prev, [id]: { ...prev[id], error: message, showLog: true } },
+          );
+        }
+      }
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   // Auto-scroll open log boxes to bottom
   useEffect(() => {
     for (const { id } of INSTANCE_META) {
@@ -415,7 +467,14 @@ export function ComfyLauncherPanel({
 
       setInstances((prev) => ({
         ...prev,
-        [id]: { ...prev[id], error: '', logs: [], online: false, activePort: portVal },
+        [id]: {
+          ...prev[id],
+          error: '',
+          logs: [],
+          online: false,
+          stopRequested: false,
+          activePort: portVal,
+        },
       }));
 
       const result = await bridge.start({
@@ -442,6 +501,7 @@ export function ComfyLauncherPanel({
           ...prev[id],
           running: true,
           online: false,
+          startedAt: prev[id].startedAt ?? Date.now(),
           activePort: portVal,
           showLog: true,
           error: '',
@@ -454,6 +514,7 @@ export function ComfyLauncherPanel({
   const handleStop = useCallback(
     async (id: ComfyInstanceId) => {
       if (!bridge) return;
+      setInstances((prev) => ({ ...prev, [id]: { ...prev[id], stopRequested: true } }));
       await bridge.stop(id);
     },
     [bridge],
@@ -736,7 +797,10 @@ export function ComfyLauncherPanel({
               })()}
 
               {state.error && (
-                <p role="alert" className="mt-2 text-[11px] leading-relaxed text-[#FCA5A5]">
+                <p
+                  role="alert"
+                  className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-[#FCA5A5]"
+                >
                   {state.error}
                 </p>
               )}
