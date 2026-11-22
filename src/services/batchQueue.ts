@@ -100,3 +100,39 @@ export function saveBatchQueue(queue: BatchQueueItem[]): void {
     // Ignore storage quota errors
   }
 }
+
+/** Servers the queue can spread scenes over (ComfyUI instance 1 on GPU 0, instance 2 on GPU 1). */
+export const QUEUE_SERVER_CHOICES: Array<{ url: string; label: string }> = [
+  { url: 'http://127.0.0.1:8188', label: 'Порт 8188 · видеокарта 0' },
+  { url: 'http://127.0.0.1:8189', label: 'Порт 8189 · видеокарта 1' },
+];
+
+const QUEUE_SERVERS_STORAGE_KEY = 'kinoflow_studio_queue_servers_v1';
+
+export function loadQueueServers(): string[] {
+  const allowed = new Set(QUEUE_SERVER_CHOICES.map((choice) => choice.url));
+  try {
+    const raw = localStorage.getItem(QUEUE_SERVERS_STORAGE_KEY);
+    if (!raw) return QUEUE_SERVER_CHOICES.map((choice) => choice.url);
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return QUEUE_SERVER_CHOICES.map((choice) => choice.url);
+    return parsed.filter((url): url is string => typeof url === 'string' && allowed.has(url));
+  } catch {
+    return QUEUE_SERVER_CHOICES.map((choice) => choice.url);
+  }
+}
+
+export function saveQueueServers(urls: string[]): void {
+  try {
+    localStorage.setItem(QUEUE_SERVERS_STORAGE_KEY, JSON.stringify(urls));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+/** Live progress of a queue job, kept in memory only. */
+export interface QueueItemLiveProgress {
+  percent: number;
+  text: string;
+  serverUrl: string;
+}

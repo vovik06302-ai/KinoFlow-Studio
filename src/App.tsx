@@ -14,6 +14,9 @@ import { StoryboardPanel } from './components/StoryboardPanel';
 import { UpdateControl } from './components/UpdateControl';
 import { WorkflowInspectorView } from './components/WorkflowInspectorView';
 import {
+  QUEUE_SERVER_CHOICES,
+  loadQueueServers,
+  saveQueueServers,
   clearFinishedBatchItems,
   createBatchQueueItem,
   enqueueBatchItem,
@@ -23,7 +26,14 @@ import {
   saveBatchQueue,
   updateBatchItem,
 } from './services/batchQueue';
-import type { BatchQueueItem } from './services/batchQueue';
+import type { BatchQueueItem, QueueItemLiveProgress } from './services/batchQueue';
+import {
+  WorkerUnavailableError,
+  aggregateWorkerProgress,
+  chooseQueueServers,
+  describeQueueServer,
+  runWorkerPool,
+} from './services/batchScheduler';
 import {
   DEFAULT_NEGATIVE_PROMPT,
   DURATION_CHOICES,
@@ -242,9 +252,17 @@ export default function App() {
   });
   const [batchQueue, setBatchQueue] = useState<BatchQueueItem[]>(() => loadBatchQueue());
   const [isRunningBatchQueue, setIsRunningBatchQueue] = useState(false);
+  const [queueServerUrls, setQueueServerUrls] = useState<string[]>(() => loadQueueServers());
+  const [queueItemProgress, setQueueItemProgress] = useState<Record<string, QueueItemLiveProgress>>({});
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const stopBatchQueueRef = useRef(false);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const queueServerUrlsRef = useRef<string[]>(queueServerUrls);
+  queueServerUrlsRef.current = queueServerUrls;
+  const queueControllersRef = useRef<Set<AbortController>>(new Set());
+  const workerProgressRef = useRef<Map<string, { jobId: string; label: string; progress: GenerationProgress }>>(new Map());
   const batchQueueRef = useRef<BatchQueueItem[]>(batchQueue);
   batchQueueRef.current = batchQueue;
   const historyRef = useRef<GenerationHistoryItem[]>(history);
@@ -296,6 +314,10 @@ export default function App() {
   useEffect(() => {
     saveBatchQueue(batchQueue);
   }, [batchQueue]);
+
+  useEffect(() => {
+    saveQueueServers(queueServerUrls);
+  }, [queueServerUrls]);
 
   useEffect(() => {
     return () => {
@@ -940,6 +962,7 @@ export default function App() {
   const handleCancelGeneration = useCallback(() => {
     stopBatchQueueRef.current = true;
     abortControllerRef.current?.abort();
+    queueControllersRef.current.forEach((controller) => controller.abort());
   }, []);
 
   const handleAddToBatchQueue = useCallback(() => {
@@ -979,6 +1002,45 @@ export default function App() {
   const handleStopBatchQueue = useCallback(() => {
     stopBatchQueueRef.current = true;
     abortControllerRef.current?.abort();
+    queueControllersRef.current.forEach((controller) => controller.abort());
+  }, []);
+
+  const handleToggleQueueServer = useCallback((url: string) => {
+    setQueueServerUrls((prev) =>
+      prev.includes(url) ? prev.filter((item) => item !== url) : [...prev, url],
+    );
+  }, []);
+
+  /** Updates the queue synchronously (ref first), so two workers never see stale statuses. */
+  const patchBatchItem = useCallback(
+    (id: string, patch: Parameters<typeof updateBatchItem>[2]) => {
+      batchQueueRef.current = updateBatchItem(batchQueueRef.current, id, patch);
+      setBatchQueue(batchQueueRef.current);
+    },
+    [],
+  );
+
+  /** One progress bar for all workers: a single worker as before, several are averaged. */
+  const publishQueueProgress = useCallback(() => {
+    const active = [...workerProgressRef.current.values()].filter(
+      (entry) =>
+        entry.progress.phase !== 'completed' &&
+        entry.progress.phase !== 'error' &&
+        entry.progress.phase !== 'cancelled' &&
+        entry.progress.phase !== 'idle',
+    );
+    if (active.length === 0) return;
+    if (active.length === 1) {
+      setProgress(active[0].progress);
+      return;
+    }
+    const summary = aggregateWorkerProgress(
+      active.map((entry) => ({
+        label: entry.label,
+        progress: { percent: entry.progress.percent, message: entry.progress.message },
+      })),
+    );
+    setProgress({ phase: 'running', percent: summary.percent, message: summary.message });
   }, []);
 
   const handleStartBatchQueue = useCallback(async () => {
@@ -987,20 +1049,64 @@ export default function App() {
     setIsRunningBatchQueue(true);
     setGenerationError(null);
     setPreflightReport(null);
+    setQueueItemProgress({});
+    workerProgressRef.current.clear();
+
+    let failedJobs = 0;
+    let finishedJobs = 0;
 
     try {
-      while (!stopBatchQueueRef.current) {
-        const nextJob = getNextPendingBatchItem(batchQueueRef.current);
-        if (!nextJob) break;
+      // Check which of the chosen ComfyUI servers answer; fall back to the current server.
+      const candidates = [...queueServerUrlsRef.current, settingsRef.current.serverUrl];
+      const online = new Set<string>();
+      await Promise.all(
+        [...new Set(candidates.map((url) => url.trim().replace(/\/+$/, '')))].map(async (url) => {
+          try {
+            const info = await checkConnection(url, 3500, { allowAutoProbe: false });
+            if (info.status === 'online') online.add(url);
+          } catch {
+            // an unreachable server is simply not used
+          }
+        }),
+      );
+      let servers = chooseQueueServers(
+        queueServerUrlsRef.current,
+        settingsRef.current.serverUrl,
+        (url) => online.has(url),
+      );
+      if (servers.length === 0) {
+        servers = chooseQueueServers([], settingsRef.current.serverUrl, (url) => online.has(url));
+      }
+      if (servers.length === 0) {
+        setGenerationError(
+          'Ни один сервер ComfyUI не отвечает. Запустите ComfyUI (блок «Запуск ComfyUI») и повторите.',
+        );
+        return;
+      }
 
-        setBatchQueue((prev) => updateBatchItem(prev, nextJob.id, { status: 'running', error: undefined }));
-
-        const effectiveSeed = nextJob.settings.seedLocked ? nextJob.settings.seed : randomSeed();
-        const runSettings: GenerationSettings = { ...nextJob.settings, seed: effectiveSeed };
+      const runQueueJob = async (job: BatchQueueItem, serverUrl: string): Promise<void> => {
+        const label = describeQueueServer(serverUrl);
         const controller = new AbortController();
-        abortControllerRef.current = controller;
+        queueControllersRef.current.add(controller);
 
-        setProgress({
+        const effectiveSeed = job.settings.seedLocked ? job.settings.seed : randomSeed();
+        const runSettings: GenerationSettings = {
+          ...job.settings,
+          seed: effectiveSeed,
+          serverUrl,
+        };
+
+        const report = (p: GenerationProgress) => {
+          workerProgressRef.current.set(serverUrl, { jobId: job.id, label, progress: p });
+          setQueueItemProgress((prev) => ({
+            ...prev,
+            [job.id]: { percent: p.percent, text: p.message, serverUrl },
+          }));
+          publishQueueProgress();
+        };
+
+        patchBatchItem(job.id, { status: 'running', error: undefined });
+        report({
           phase: 'uploading',
           percent: 4,
           segmentIndex: 1,
@@ -1008,17 +1114,17 @@ export default function App() {
           segmentStartSec: 0,
           segmentEndSec: SEGMENT_DURATION_SEC,
           segmentMode: runSettings.mode,
-          message: `Очередь: запуск сцены «${nextJob.prompt.slice(0, 48)}»...`,
+          message: `Очередь (${label}): запуск сцены «${job.prompt.slice(0, 48)}»...`,
         });
 
         try {
-          let promptForComfy = nextJob.prompt;
+          let promptForComfy = job.prompt;
           if (
             runSettings.autoTranslateRuPrompt !== false &&
             runSettings.localLlmUrl?.trim() &&
-            containsCyrillic(nextJob.prompt)
+            containsCyrillic(job.prompt)
           ) {
-            const translated = await translatePromptToEnglishViaLocalLlm(nextJob.prompt, {
+            const translated = await translatePromptToEnglishViaLocalLlm(job.prompt, {
               url: runSettings.localLlmUrl,
               model: runSettings.localLlmModel,
             });
@@ -1032,20 +1138,20 @@ export default function App() {
           );
           const effectivePositivePrompt = applyLightingToPrompt(
             styledPrompt,
-            nextJob.lightingPreset,
+            job.lightingPreset,
             false,
           );
 
           const result = await runComfyGeneration({
             settings: runSettings,
             positivePrompt: effectivePositivePrompt,
-            negativePrompt: nextJob.negativePrompt,
+            negativePrompt: job.negativePrompt,
             characters: [],
-            defaultCamera: nextJob.cameraPreset,
+            defaultCamera: job.cameraPreset,
             startFrame: runSettings.mode === 'i2v' ? startFrameRef.current : null,
             endFrame: runSettings.mode === 'i2v' ? endFrameRef.current : null,
             signal: controller.signal,
-            onProgress: setProgress,
+            onProgress: report,
           });
 
           const modelOption = getModelOption(runSettings.modelId);
@@ -1054,9 +1160,9 @@ export default function App() {
             id: result.promptId,
             createdAt: new Date().toISOString(),
             mode: runSettings.mode,
-            prompt: nextJob.prompt,
-            enhancedPrompt: promptForComfy !== nextJob.prompt ? promptForComfy : undefined,
-            negativePrompt: nextJob.negativePrompt,
+            prompt: job.prompt,
+            enhancedPrompt: promptForComfy !== job.prompt ? promptForComfy : undefined,
+            negativePrompt: job.negativePrompt,
             modelId: runSettings.modelId,
             modelLabel: modelOption.shortLabel,
             width: runSettings.width,
@@ -1083,14 +1189,35 @@ export default function App() {
 
           setHistory((prev) => [historyItem, ...prev.filter((h) => h.id !== historyItem.id)]);
           setActiveVideo(historyItem);
-          setBatchQueue((prev) =>
-            updateBatchItem(prev, nextJob.id, {
-              status: 'completed',
-              resultHistoryId: historyItem.id,
-            }),
-          );
+          patchBatchItem(job.id, { status: 'completed', resultHistoryId: historyItem.id });
+          finishedJobs += 1;
         } catch (err) {
           const isCancelled = controller.signal.aborted || stopBatchQueueRef.current;
+
+          if (isCancelled) {
+            patchBatchItem(job.id, { status: 'pending', error: undefined });
+            setProgress({ phase: 'cancelled', percent: 0, message: 'Очередь остановлена.' });
+            return;
+          }
+
+          // This server cannot work (missing nodes or models, ComfyUI went away):
+          // the scene goes back to the queue and another server takes it.
+          if (err instanceof PreflightError) {
+            setPreflightReport(err.report);
+            setGenerationError(`Сервер ${label}: проверка перед запуском нашла, чего не хватает.`);
+            throw new WorkerUnavailableError(err.message);
+          }
+          let stillOnline = true;
+          try {
+            stillOnline = (await checkConnection(serverUrl, 3000, { allowAutoProbe: false })).status === 'online';
+          } catch {
+            stillOnline = false;
+          }
+          if (!stillOnline) {
+            setGenerationError(`Сервер ${label} перестал отвечать, сцена передана другому серверу.`);
+            throw new WorkerUnavailableError(`Сервер ${label} не отвечает.`);
+          }
+
           const rawMsg =
             err instanceof Error ? err.message : 'Ошибка выполнения задачи в очереди ComfyUI.';
           const formatted = formatGenerationErrorMessage({
@@ -1102,25 +1229,49 @@ export default function App() {
                 ? window.location.protocol
                 : undefined,
           });
-          setBatchQueue((prev) =>
-            updateBatchItem(prev, nextJob.id, {
-              status: isCancelled ? 'pending' : 'failed',
-              error: isCancelled ? undefined : formatted,
-            }),
-          );
-          if (isCancelled) {
-            setProgress({ phase: 'cancelled', percent: 0, message: 'Очередь остановлена.' });
-            break;
-          }
+          patchBatchItem(job.id, { status: 'failed', error: formatted });
           setGenerationError(formatted);
+          failedJobs += 1;
         } finally {
-          abortControllerRef.current = null;
+          queueControllersRef.current.delete(controller);
+          workerProgressRef.current.delete(serverUrl);
+          setQueueItemProgress((prev) => {
+            const { [job.id]: _removed, ...rest } = prev;
+            return rest;
+          });
+          publishQueueProgress();
         }
+      };
+
+      await runWorkerPool<BatchQueueItem, string>({
+        workers: servers,
+        shouldStop: () => stopBatchQueueRef.current,
+        pickNext: (claimed) =>
+          batchQueueRef.current.find(
+            (item) => item.status === 'pending' && !claimed.has(item.id),
+          ) ?? null,
+        runJob: runQueueJob,
+        onJobReleased: (job) => {
+          patchBatchItem(job.id, { status: 'pending', error: undefined });
+        },
+      });
+
+      if (!stopBatchQueueRef.current && failedJobs === 0 && finishedJobs > 0) {
+        setProgress({
+          phase: 'completed',
+          percent: 100,
+          message:
+            servers.length > 1
+              ? `Очередь завершена: сцен ${finishedJobs}, серверов ${servers.length}.`
+              : 'Очередь завершена.',
+        });
       }
     } finally {
+      queueControllersRef.current.clear();
+      workerProgressRef.current.clear();
       setIsRunningBatchQueue(false);
     }
-  }, [isRunningBatchQueue, isGenerating]);
+  }, [isRunningBatchQueue, isGenerating, patchBatchItem, publishQueueProgress]);
 
   const handleExportScenePreset = useCallback(
     () =>
@@ -1531,6 +1682,10 @@ export default function App() {
                   items={batchQueue}
                   isRunningQueue={isRunningBatchQueue}
                   isGenerating={isGenerating}
+                  serverChoices={QUEUE_SERVER_CHOICES}
+                  selectedServers={queueServerUrls}
+                  onToggleServer={handleToggleQueueServer}
+                  itemProgress={queueItemProgress}
                   onStartQueue={() => void handleStartBatchQueue()}
                   onStopQueue={handleStopBatchQueue}
                   onRemoveItem={handleRemoveBatchItem}

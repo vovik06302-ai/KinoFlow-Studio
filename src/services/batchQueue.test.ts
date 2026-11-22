@@ -6,6 +6,8 @@ import {
   enqueueBatchItem,
   getNextPendingBatchItem,
   loadBatchQueue,
+  loadQueueServers,
+  saveQueueServers,
   removeBatchItem,
   saveBatchQueue,
   updateBatchItem,
@@ -94,5 +96,22 @@ test('loadBatchQueue resets stale running items back to pending across reloads',
     assert.equal(restored[0].status, 'pending');
   } finally {
     delete (globalThis as unknown as { localStorage?: Storage }).localStorage;
+  }
+});
+
+test('queue servers default to both ports, keep only known URLs and survive a reload', () => {
+  const store = new Map<string, string>();
+  (globalThis as unknown as { localStorage: unknown }).localStorage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => void store.set(key, value),
+  };
+  try {
+    assert.deepEqual(loadQueueServers(), ['http://127.0.0.1:8188', 'http://127.0.0.1:8189']);
+    saveQueueServers(['http://127.0.0.1:8189', 'http://evil.example:1']);
+    assert.deepEqual(loadQueueServers(), ['http://127.0.0.1:8189']);
+    saveQueueServers([]);
+    assert.deepEqual(loadQueueServers(), [], 'an empty choice means: use the current server only');
+  } finally {
+    delete (globalThis as unknown as { localStorage?: unknown }).localStorage;
   }
 });
