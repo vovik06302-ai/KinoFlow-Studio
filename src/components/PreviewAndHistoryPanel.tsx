@@ -13,9 +13,16 @@ import {
   RotateCcw,
   Square,
   Trash2,
+  Volume2,
   Wrench,
   X,
 } from 'lucide-react';
+import {
+  AUDIO_VOLUME_DEFAULT_PERCENT,
+  AUDIO_VOLUME_MAX_PERCENT,
+  AUDIO_VOLUME_MIN_PERCENT,
+  buildFilmMergeAudioOptions,
+} from '../services/audioService';
 import {
   computeUpscaleTargetSize,
   formatSegmentLabel,
@@ -28,6 +35,8 @@ import {
   triggerVideoDownload,
 } from '../utils/videoDownload';
 import { mergeVideoSegments } from '../utils/videoFrameUtils';
+import { resolveSegmentAudioUrl } from '../utils/audioWaveform';
+import { SegmentAudioPlayer } from './SegmentAudioPlayer';
 import type { FilmMergeProgress, SelectedAudioTrack } from '../types/film';
 import type {
   GenerationHistoryItem,
@@ -114,6 +123,8 @@ interface PreviewAndHistoryPanelProps {
   onDeleteHistoryItem: (id: string) => void;
   onClearHistory: () => void;
   onOpenCorsGuide: () => void;
+  externalAudioTrack?: SelectedAudioTrack | null;
+  onSwitchToExternalAudio?: () => void;
 }
 
 export function PreviewAndHistoryPanel({
@@ -136,6 +147,8 @@ export function PreviewAndHistoryPanel({
   onDeleteHistoryItem,
   onClearHistory,
   onOpenCorsGuide,
+  externalAudioTrack = null,
+  onSwitchToExternalAudio,
 }: PreviewAndHistoryPanelProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const localVideoInputRef = useRef<HTMLInputElement | null>(null);
@@ -147,6 +160,9 @@ export function PreviewAndHistoryPanel({
   const [mergeProgress, setMergeProgress] = useState<FilmMergeProgress | null>(null);
   const [savedFilmPath, setSavedFilmPath] = useState<string | null>(null);
   const [selectedAudio, setSelectedAudio] = useState<SelectedAudioTrack | null>(null);
+  const [audioVolumePercent, setAudioVolumePercent] = useState<number>(
+    AUDIO_VOLUME_DEFAULT_PERCENT,
+  );
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
   const [fixingFlush, setFixingFlush] = useState(false);
   const [flushFixNotice, setFlushFixNotice] = useState<string | null>(null);
@@ -160,11 +176,24 @@ export function PreviewAndHistoryPanel({
     segments ? selectedSegmentIndex : undefined,
   );
   const currentVideoSrc = activeDownloadTarget?.url ?? '';
+  const activeAudioUrl = resolveSegmentAudioUrl(activeSegment, activeVideo);
+  const activeHasAudio = Boolean(
+    activeSegment
+      ? activeSegment.hasAudio || Boolean(activeAudioUrl)
+      : activeVideo?.hasAudio || Boolean(activeAudioUrl),
+  );
 
   useEffect(() => {
     setSelectedSegmentIndex(0);
     setMergeError(null);
   }, [activeVideo?.id]);
+
+  useEffect(() => {
+    if (externalAudioTrack) {
+      setSelectedAudio(externalAudioTrack);
+      setMergeError(null);
+    }
+  }, [externalAudioTrack]);
 
   useEffect(() => {
     setFlushFixNotice(null);
@@ -279,10 +308,11 @@ export function PreviewAndHistoryPanel({
           const suggestedName = selectedAudio
             ? `kinoflow_audio_${activeVideo?.durationSec ?? 5}s.mp4`
             : `kinoflow_film_${activeVideo?.durationSec ?? 10}s.mp4`;
+          const audioOptions = buildFilmMergeAudioOptions(selectedAudio, audioVolumePercent);
           const result = await filmBridge.mergeSegments(
             urls,
             suggestedName,
-            selectedAudio ? { audioPath: selectedAudio.path, audioVolume: 1.0 } : undefined,
+            audioOptions,
           );
           if (result.ok && result.path) {
             setSavedFilmPath(result.path);
@@ -373,12 +403,23 @@ export function PreviewAndHistoryPanel({
       {/* Primary Stage: Video Player & Progress */}
       <section aria-labelledby="preview-heading">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <h2
-            id="preview-heading"
-            className="text-sm font-semibold tracking-tight text-[#F1F5F9]"
-          >
-            Предпросмотр результата
-          </h2>
+          <div className="flex items-center gap-2">
+            <h2
+              id="preview-heading"
+              className="text-sm font-semibold tracking-tight text-[#F1F5F9]"
+            >
+              Предпросмотр результата
+            </h2>
+            {activeVideo && !isGenerating && activeHasAudio && (
+              <span
+                title="В этом видео присутствует аудиодорожка"
+                className="inline-flex items-center gap-1 rounded border border-[#E58E26]/40 bg-[#E58E26]/12 px-1.5 py-0.5 text-[11px] font-medium text-[#F6AD55]"
+              >
+                <Volume2 className="h-3 w-3" aria-hidden="true" />
+                <span>Со звуком</span>
+              </span>
+            )}
+          </div>
 
           <div className="flex flex-wrap items-center gap-2">
             {!isGenerating && (
@@ -575,10 +616,31 @@ export function PreviewAndHistoryPanel({
             )}
           </div>
 
+          {/* Segment Sound Player (HTML5 <audio> + decoded waveform visualization) */}
+          {activeVideo && !isGenerating && activeAudioUrl && (
+            <SegmentAudioPlayer
+              key={activeAudioUrl}
+              audioUrl={activeAudioUrl}
+              segmentLabel={
+                activeSegment
+                  ? `Сегмент ${activeSegment.index} (${activeSegment.startSec}–${activeSegment.endSec}с)`
+                  : undefined
+              }
+              soundDescription={activeVideo.soundDescription}
+              downloadFilename={
+                activeSegment
+                  ? `kinoflow_seg${activeSegment.index}_audio.wav`
+                  : 'kinoflow_audio.wav'
+              }
+            />
+          )}
+
           {/* Segment Selector Strip & Optional FFmpeg Audio Track Bar */}
           {activeVideo &&
             !isGenerating &&
-            ((segments && segments.length > 1) || Boolean(window.kinoflowFilm?.selectAudio)) && (
+            ((segments && segments.length > 1) ||
+              Boolean(window.kinoflowFilm?.selectAudio) ||
+              Boolean(selectedAudio)) && (
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#1E2330] bg-[#10141D] px-4 py-2.5">
                 <div className="flex flex-wrap items-center gap-1.5">
                   {segments &&
@@ -588,47 +650,89 @@ export function PreviewAndHistoryPanel({
                         key={`${seg.promptId}-${seg.index}`}
                         type="button"
                         onClick={() => setSelectedSegmentIndex(idx)}
-                        className={`whitespace-nowrap rounded px-2.5 py-1 font-mono text-[11px] tabular-nums transition-colors ${
+                        className={`inline-flex items-center gap-1 whitespace-nowrap rounded px-2.5 py-1 font-mono text-[11px] tabular-nums transition-colors ${
                           selectedSegmentIndex === idx
                             ? 'bg-[#252C3D] text-[#F8FAFC]'
                             : 'text-[#94A3B8] hover:bg-[#191E2A] hover:text-[#E2E8F0]'
                         }`}
                       >
-                        Сегмент {seg.index} ({seg.startSec}–{seg.endSec}с)
+                        <span>
+                          Сегмент {seg.index} ({seg.startSec}–{seg.endSec}с)
+                        </span>
+                        {(seg.hasAudio || seg.audioUrl) && (
+                          <Volume2
+                            className="h-3 w-3 text-[#F6AD55]"
+                            aria-label="Сегмент со звуком"
+                          />
+                        )}
                       </button>
                     ))}
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2">
-                  {window.kinoflowFilm?.selectAudio && (
-                    <div className="inline-flex items-center gap-1">
-                      <button
-                        type="button"
-                        disabled={isMerging}
-                        onClick={() => void handleSelectAudioTrack()}
-                        title="Выбрать MP3/WAV/M4A аудиодорожку для наложения через FFmpeg"
-                        className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
-                          selectedAudio
-                            ? 'border-[#E58E26]/60 bg-[#E58E26]/15 text-[#F6AD55]'
-                            : 'border-[#262C3A] bg-[#141821] text-[#CBD5E1] hover:border-[#3A4358] hover:text-white'
-                        }`}
-                      >
-                        <Music className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span className="max-w-[140px] truncate">
-                          {selectedAudio ? selectedAudio.name : 'Аудио (FFmpeg)'}
-                        </span>
-                      </button>
-                      {selectedAudio && (
-                        <button
-                          type="button"
-                          disabled={isMerging}
-                          onClick={() => setSelectedAudio(null)}
-                          aria-label="Убрать аудиодорожку"
-                          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-[#262C3A] bg-[#141821] text-[#94A3B8] hover:text-[#F87171]"
+                <div className="flex flex-wrap items-center gap-2.5">
+                  {(window.kinoflowFilm?.selectAudio || selectedAudio) && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="inline-flex items-center gap-1">
+                        {window.kinoflowFilm?.selectAudio && (
+                          <button
+                            type="button"
+                            disabled={isMerging}
+                            onClick={() => void handleSelectAudioTrack()}
+                            title="Выбрать MP3/WAV/M4A аудиодорожку для склейки фильма через FFmpeg"
+                            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
+                              selectedAudio
+                                ? 'border-[#E58E26]/60 bg-[#E58E26]/15 text-[#F6AD55]'
+                                : 'border-[#262C3A] bg-[#141821] text-[#CBD5E1] hover:border-[#3A4358] hover:text-white'
+                            }`}
+                          >
+                            <Music className="h-3.5 w-3.5" aria-hidden="true" />
+                            <span className="max-w-[160px] truncate">
+                              {selectedAudio ? selectedAudio.name : 'Выбрать аудиофайл'}
+                            </span>
+                          </button>
+                        )}
+                        {selectedAudio && (
+                          <button
+                            type="button"
+                            disabled={isMerging}
+                            onClick={() => setSelectedAudio(null)}
+                            aria-label="Убрать аудиодорожку"
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-[#262C3A] bg-[#141821] text-[#94A3B8] hover:text-[#F87171]"
+                          >
+                            <X className="h-3.5 w-3.5" aria-hidden="true" />
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="inline-flex items-center gap-2 rounded-md border border-[#222734] bg-[#141821] px-2.5 py-1">
+                        <Volume2
+                          className={`h-3.5 w-3.5 shrink-0 ${
+                            selectedAudio ? 'text-[#F6AD55]' : 'text-[#64748B]'
+                          }`}
+                          aria-hidden="true"
+                        />
+                        <label
+                          htmlFor="film-audio-volume-range"
+                          className="text-[11px] text-[#94A3B8]"
                         >
-                          <X className="h-3.5 w-3.5" aria-hidden="true" />
-                        </button>
-                      )}
+                          Громкость
+                        </label>
+                        <input
+                          id="film-audio-volume-range"
+                          type="range"
+                          min={AUDIO_VOLUME_MIN_PERCENT}
+                          max={AUDIO_VOLUME_MAX_PERCENT}
+                          step={5}
+                          value={audioVolumePercent}
+                          disabled={isMerging}
+                          aria-label="Громкость аудиодорожки (0–200%)"
+                          onChange={(e) => setAudioVolumePercent(Number(e.target.value))}
+                          className="h-1.5 w-20 cursor-pointer appearance-none rounded-sm bg-[#262C3A] accent-[#E58E26] disabled:opacity-50"
+                        />
+                        <span className="w-9 text-right font-mono text-[11px] tabular-nums text-[#E2E8F0]">
+                          {audioVolumePercent}%
+                        </span>
+                      </div>
                     </div>
                   )}
 
@@ -779,6 +883,12 @@ export function PreviewAndHistoryPanel({
                 <p className="line-clamp-2 text-xs leading-relaxed text-[#CBD5E1]">
                   {activeVideo.enhancedPrompt || activeVideo.prompt}
                 </p>
+                {activeVideo.soundDescription && (
+                  <p className="mt-1 flex items-center gap-1.5 text-[11px] text-[#94A3B8]">
+                    <Volume2 className="h-3 w-3 shrink-0 text-[#F6AD55]" aria-hidden="true" />
+                    <span className="truncate">Звук: {activeVideo.soundDescription}</span>
+                  </p>
+                )}
                 <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] tabular-nums text-[#64748B]">
                   <span>{activeVideo.mode === 'i2v' ? 'I2V' : 'T2V'}</span>
                   <span aria-hidden="true">·</span>
@@ -937,6 +1047,22 @@ export function PreviewAndHistoryPanel({
                         Открыть «Модели и установка»
                       </button>
                     )}
+                    {onSwitchToExternalAudio &&
+                      preflightReport.missingNodes.some(
+                        (node) =>
+                          node.classType === 'MMAudioModelLoader' ||
+                          node.classType === 'MMAudioFeatureUtilsLoader' ||
+                          node.classType === 'MMAudioSampler' ||
+                          node.classType === 'AudioCraft',
+                      ) && (
+                        <button
+                          type="button"
+                          onClick={onSwitchToExternalAudio}
+                          className="rounded-md border border-[#E58E26] bg-[#2A1D0B] px-3 py-1.5 text-xs font-semibold text-[#F5B461] hover:bg-[#3A2810]"
+                        >
+                          Переключить звук на внешний API (fallback)
+                        </button>
+                      )}
                     <span className="text-[11px] text-[#FCA5A5]/70">
                       После установки перезапустите ComfyUI и повторите генерацию.
                     </span>
@@ -986,6 +1112,11 @@ export function PreviewAndHistoryPanel({
           <ul className="divide-y divide-[#1E2330] rounded-lg border border-[#222734] bg-[#10141C]">
             {history.map((item) => {
               const isSelected = activeVideo?.id === item.id;
+              const itemHasAudio = Boolean(
+                item.hasAudio ||
+                  item.audioUrl ||
+                  item.segments?.some((seg) => Boolean(seg.hasAudio || seg.audioUrl)),
+              );
               return (
                 <li
                   key={item.id}
@@ -998,9 +1129,17 @@ export function PreviewAndHistoryPanel({
                     onClick={() => onSelectHistoryItem(item)}
                     className="min-w-0 flex-1 text-left focus-visible:outline-2 focus-visible:outline-[#E58E26]"
                   >
-                    <p className="truncate text-xs font-medium text-[#F1F5F9]">
-                      {item.prompt}
-                    </p>
+                    <div className="flex items-center gap-1.5">
+                      <p className="truncate text-xs font-medium text-[#F1F5F9]">
+                        {item.prompt}
+                      </p>
+                      {itemHasAudio && (
+                        <Volume2
+                          className="h-3.5 w-3.5 shrink-0 text-[#F6AD55]"
+                          aria-label="Видео со звуком"
+                        />
+                      )}
+                    </div>
                     <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px] tabular-nums text-[#64748B]">
                       <span>{item.mode === 'i2v' ? 'I2V' : 'T2V'}</span>
                       <span aria-hidden="true">·</span>
@@ -1016,6 +1155,12 @@ export function PreviewAndHistoryPanel({
                       <span>
                         {item.upscale1080p ? '1080p Upscale' : `${item.width}×${item.height}`}
                       </span>
+                      {itemHasAudio && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-[#F6AD55]">Звук</span>
+                        </>
+                      )}
                       <span aria-hidden="true">·</span>
                       <span>Seed {item.seed}</span>
                       <span aria-hidden="true">·</span>

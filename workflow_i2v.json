@@ -159,8 +159,8 @@
       "noise_seed": 42,
       "steps": 28,
       "cfg": 4.0,
-      "sampler_name": "uni_pc",
-      "scheduler": "simple",
+      "sampler_name": "euler",
+      "scheduler": "beta",
       "start_at_step": 0,
       "end_at_step": 10,
       "return_with_leftover_noise": "enable"
@@ -193,8 +193,8 @@
       "noise_seed": 42,
       "steps": 28,
       "cfg": 3.5,
-      "sampler_name": "uni_pc",
-      "scheduler": "simple",
+      "sampler_name": "euler",
+      "scheduler": "beta",
       "start_at_step": 10,
       "end_at_step": 10000,
       "return_with_leftover_noise": "disable"
@@ -215,24 +215,24 @@
         "4",
         0
       ],
-      "tile_size": 256,
+      "tile_size": 512,
       "overlap": 64,
       "temporal_size": 64,
       "temporal_overlap": 8
     },
     "_meta": {
       "title": "Tiled Video VAE Decode",
-      "comment": "Тайловое декодирование латентов I2V сегмента перед постобработкой (апскейл/RIFE) или экспортом."
+      "comment": "Тайловое декодирование латентов I2V сегмента перед постобработкой (апскейл/RIFE), генерацией звука MMAudio (#82) или экспортом."
     }
   },
   "55": {
     "class_type": "UpscaleModelLoader",
     "inputs": {
-      "model_name": "4x-UltraSharp.pth"
+      "model_name": "RealESRGAN_x2plus.pth"
     },
     "_meta": {
       "title": "Cinema Upscale Model Loader (1080p Post-Processing)",
-      "comment": "МЕСТО ПОДКЛЮЧЕНИЯ АПСКЕЙЛА: нейросетевой апскейл кадров до 1080p. Вырезается автоматически, если «Кино-апскейл до 1080p» выключен."
+      "comment": "МЕСТО ПОДКЛЮЧЕНИЯ АПСКЕЙЛА: нейросетевой апскейл кадров до 1080p (RealESRGAN_x2plus.pth без пластикового перешарпа на коже). Вырезается автоматически, если «Кино-апскейл до 1080p» выключен."
     }
   },
   "56": {
@@ -279,13 +279,67 @@
       "ckpt_name": "rife49.pth",
       "clear_cache_after_n_frames": 10,
       "multiplier": 2,
-      "fast_mode": true,
+      "fast_mode": false,
       "ensemble": true,
       "scale_factor": 1.0
     },
     "_meta": {
       "title": "RIFE Frame Interpolation (24 / 30 FPS Smoothness)",
-      "comment": "МЕСТО ПОДКЛЮЧЕНИЯ RIFE: интерполяция кадров (ComfyUI-Frame-Interpolation) для плавности 24 или 30 FPS без дёрганости."
+      "comment": "МЕСТО ПОДКЛЮЧЕНИЯ RIFE: интерполяция кадров (ComfyUI-Frame-Interpolation, fast_mode: false) для плавности 24 или 30 FPS без артефактов."
+    }
+  },
+  "80": {
+    "class_type": "MMAudioModelLoader",
+    "inputs": {
+      "mmaudio_model": "mmaudio_large_44k_v2_fp16.safetensors",
+      "base_precision": "fp16"
+    },
+    "_meta": {
+      "title": "MMAudio Model Loader",
+      "comment": "Загружает модель MMAudio (ComfyUI-MMAudio) для синхронной генерации звука по видеокадрам и промпту. Узлы #80–#82 удаляются автоматически, если звук выключен."
+    }
+  },
+  "81": {
+    "class_type": "MMAudioFeatureUtilsLoader",
+    "inputs": {
+      "vae_model": "mmaudio_vae_44k_fp16.safetensors",
+      "synchformer_model": "mmaudio_synchformer_fp16.safetensors",
+      "clip_model": "apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors",
+      "mode": "44k",
+      "precision": "fp16"
+    },
+    "_meta": {
+      "title": "MMAudio Feature Utils Loader",
+      "comment": "Загружает VAE, Synchformer и CLIP-энкодер для MMAudio. Удаляется автоматически, если звук выключен."
+    }
+  },
+  "82": {
+    "class_type": "MMAudioSampler",
+    "inputs": {
+      "mmaudio_model": [
+        "80",
+        0
+      ],
+      "feature_utils": [
+        "81",
+        0
+      ],
+      "images": [
+        "50",
+        0
+      ],
+      "duration": 5,
+      "steps": 25,
+      "cfg": 4.5,
+      "seed": 42,
+      "prompt": "{{AUDIO_PROMPT}}",
+      "negative_prompt": "",
+      "mask_away_clip": false,
+      "force_offload": true
+    },
+    "_meta": {
+      "title": "MMAudio Video-to-Audio Sampler",
+      "comment": "СЮДА ПОДСТАВЛЯЕТСЯ {{AUDIO_PROMPT}} и длительность видео; принимает кадры из #50 (VAEDecodeTiled) и передаёт звук в #60 (VHS_VideoCombine). Узлы #80–#82 удаляются автоматически, если звук выключен."
     }
   },
   "60": {
@@ -293,6 +347,10 @@
     "inputs": {
       "images": [
         "58",
+        0
+      ],
+      "audio": [
+        "82",
         0
       ],
       "frame_rate": 24,
@@ -307,7 +365,7 @@
     },
     "_meta": {
       "title": "Export I2V MP4 Segment (VideoHelperSuite)",
-      "comment": "Вход images автоматически подключается к #58 (RIFE), #57 (1080p Upscale) или #50 (VAEDecodeTiled)."
+      "comment": "Вход images автоматически подключается к #58 (RIFE), #57 (1080p Upscale) или #50 (VAEDecodeTiled). Вход audio подключается к #82 (MMAudioSampler) при включённой генерации звука."
     }
   }
 }

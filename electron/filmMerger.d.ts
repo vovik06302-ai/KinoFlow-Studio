@@ -11,6 +11,7 @@ export declare function findFfmpeg(options?: {
   candidates?: string[];
   spawnImpl?: unknown;
 }): Promise<string | null>;
+export declare function mp4HasAudioTrack(filePath: string): boolean;
 export declare function buildMergeArgs(options: {
   inputs: string[];
   output: string;
@@ -18,6 +19,8 @@ export declare function buildMergeArgs(options: {
   crf?: number;
   audioPath?: string;
   audioVolume?: number;
+  preserveSegmentAudio?: boolean;
+  audioCrossfadeSec?: number;
 }): string[];
 export declare function isHttpUrl(value: unknown): boolean;
 export declare function mergeSegments(options: {
@@ -26,6 +29,8 @@ export declare function mergeSegments(options: {
   ffmpegPath: string | null;
   audioPath?: string;
   audioVolume?: number;
+  preserveSegmentAudio?: boolean;
+  audioCrossfadeSec?: number;
   tempRoot?: string;
   spawnImpl?: unknown;
   downloadImpl?: (options: { url: string; destPath: string }) => Promise<unknown>;
@@ -48,3 +53,9 @@ export declare function archiveVideoClip(options: {
   filename?: string;
   downloadImpl?: (options: { url: string; destPath: string }) => Promise<unknown>;
 }): Promise<{ localPath: string }>;
+export declare function saveGeneratedAudioFile(options: {
+  audioBase64: string;
+  outputDir: string;
+  extension?: string;
+  filename?: string;
+}): { localPath: string; name: string };

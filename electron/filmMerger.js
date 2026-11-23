@@ -51,6 +51,50 @@ export async function findFfmpeg({ candidates = ffmpegCandidates(), spawnImpl = 
   return null;
 }
 
+const MP4_SOUND_HANDLER = Buffer.from('soun');
+
+/**
+ * Inspects an MP4/MOV file in fixed-size chunks for the ISO BMFF `soun` media handler box
+ * (present in all standard MP4 containers that carry an audio track, e.g. from VHS_VideoCombine + MMAudio).
+ * Pure-JS check avoids spawning an extra ffprobe process and returns false safely for non-MP4/video-only files.
+ */
+export function mp4HasAudioTrack(filePath) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const chunkSize = 256 * 1024;
+    const overlap = MP4_SOUND_HANDLER.length - 1;
+    const buffer = Buffer.allocUnsafe(chunkSize + overlap);
+    let carry = 0;
+
+    while (true) {
+      const bytesRead = fs.readSync(fd, buffer, carry, chunkSize, null);
+      if (bytesRead <= 0) break;
+      const total = carry + bytesRead;
+      if (buffer.subarray(0, total).includes(MP4_SOUND_HANDLER)) {
+        return true;
+      }
+      if (total >= overlap) {
+        buffer.copy(buffer, 0, total - overlap, total);
+        carry = overlap;
+      } else {
+        carry = total;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // ignore close failure
+      }
+    }
+  }
+}
+
 export function buildMergeArgs({
   inputs,
   output,
@@ -58,16 +102,19 @@ export function buildMergeArgs({
   crf = 17,
   audioPath,
   audioVolume = 1.0,
+  preserveSegmentAudio = false,
+  audioCrossfadeSec = 0.15,
 }) {
   if (!Array.isArray(inputs) || inputs.length === 0) {
     throw new Error('Нет сегментов для склейки.');
   }
-  const hasAudio = typeof audioPath === 'string' && audioPath.trim().length > 0;
+  const hasExternalAudio = typeof audioPath === 'string' && audioPath.trim().length > 0;
+  const shouldKeepSegmentAudio = !hasExternalAudio && Boolean(preserveSegmentAudio);
   const args = ['-y', '-hide_banner', '-loglevel', 'error'];
   for (const input of inputs) {
     args.push('-i', input);
   }
-  if (hasAudio) {
+  if (hasExternalAudio) {
     args.push('-stream_loop', '-1', '-i', audioPath.trim());
   }
 
@@ -81,13 +128,31 @@ export function buildMergeArgs({
 
   const audioInputIndex = inputs.length;
   const clampedVol = Number.isFinite(audioVolume) ? Math.max(0, Math.min(2, audioVolume)) : 1.0;
-  if (hasAudio && clampedVol !== 1.0) {
+  if (hasExternalAudio && clampedVol !== 1.0) {
     filter += `;[${audioInputIndex}:a]volume=${clampedVol.toFixed(2)}[outa]`;
+  } else if (shouldKeepSegmentAudio) {
+    if (inputs.length === 1) {
+      filter += ';[0:a]asetpts=PTS-STARTPTS[outa]';
+    } else {
+      const clampedFade = Number.isFinite(audioCrossfadeSec)
+        ? Math.max(0.02, Math.min(2.0, audioCrossfadeSec))
+        : 0.15;
+      const fadeStr = Number(clampedFade.toFixed(3)).toString();
+      const audioPrep = inputs.map((_, index) => `[${index}:a]asetpts=PTS-STARTPTS[a${index}]`);
+      const crossfades = [];
+      let prevLabel = '[a0]';
+      for (let i = 1; i < inputs.length; i += 1) {
+        const nextOut = i === inputs.length - 1 ? '[outa]' : `[af${i}]`;
+        crossfades.push(`${prevLabel}[a${i}]acrossfade=d=${fadeStr}:c1=tri:c2=tri${nextOut}`);
+        prevLabel = nextOut;
+      }
+      filter += `;${audioPrep.join(';')};${crossfades.join(';')}`;
+    }
   }
 
   args.push('-filter_complex', filter, '-map', '[outv]');
 
-  if (hasAudio) {
+  if (hasExternalAudio) {
     args.push(
       '-map',
       clampedVol !== 1.0 ? '[outa]' : `${audioInputIndex}:a`,
@@ -97,6 +162,8 @@ export function buildMergeArgs({
       '192k',
       '-shortest',
     );
+  } else if (shouldKeepSegmentAudio) {
+    args.push('-map', '[outa]', '-c:a', 'aac', '-b:a', '192k');
   } else {
     args.push('-an');
   }
@@ -132,6 +199,8 @@ export async function mergeSegments({
   ffmpegPath,
   audioPath,
   audioVolume = 1.0,
+  preserveSegmentAudio,
+  audioCrossfadeSec = 0.15,
   tempRoot = os.tmpdir(),
   spawnImpl = spawn,
   downloadImpl = downloadToFile,
@@ -156,8 +225,22 @@ export async function mergeSegments({
       inputs.push(target);
     }
 
+    const hasExternalAudio = typeof audioPath === 'string' && audioPath.trim().length > 0;
+    const shouldPreserveSegmentAudio =
+      !hasExternalAudio &&
+      (typeof preserveSegmentAudio === 'boolean'
+        ? preserveSegmentAudio
+        : inputs.every((filePath) => mp4HasAudioTrack(filePath)));
+
     onProgress?.({ phase: 'encoding', index: segmentUrls.length, total: segmentUrls.length });
-    const args = buildMergeArgs({ inputs, output: outputPath, audioPath, audioVolume });
+    const args = buildMergeArgs({
+      inputs,
+      output: outputPath,
+      audioPath,
+      audioVolume,
+      preserveSegmentAudio: shouldPreserveSegmentAudio,
+      audioCrossfadeSec,
+    });
     const { code, stderr } = await runProcess(ffmpegPath, args, spawnImpl);
     if (code !== 0) {
       throw new Error(`FFmpeg завершился с кодом ${code}. ${stderr.trim().split('\n').slice(-3).join(' ')}`);
@@ -274,4 +357,44 @@ export async function archiveVideoClip({
   const destPath = path.join(archiveDir, finalName);
   await downloadImpl({ url: videoUrl, destPath });
   return { localPath: destPath };
+}
+
+const MAX_GENERATED_AUDIO_BYTES = 50 * 1024 * 1024;
+const ALLOWED_AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg']);
+
+/**
+ * Persists a base64-encoded audio track generated by an external API into a confined local
+ * directory so FFmpeg `mergeSegments` can mux it into the final MP4.
+ */
+export function saveGeneratedAudioFile({ audioBase64, outputDir, extension = 'mp3', filename }) {
+  if (typeof audioBase64 !== 'string' || !audioBase64.trim()) {
+    throw new Error('Пустые аудиоданные для сохранения.');
+  }
+  const bytes = Buffer.from(audioBase64.trim(), 'base64');
+  if (bytes.length === 0) {
+    throw new Error('Не удалось декодировать аудиофайл из base64.');
+  }
+  if (bytes.length > MAX_GENERATED_AUDIO_BYTES) {
+    throw new Error('Аудиофайл превышает допустимый размер 50 МБ.');
+  }
+
+  const normalizedExt = String(extension || 'mp3').toLowerCase().replace(/^\.+/, '');
+  const safeExt = ALLOWED_AUDIO_EXTENSIONS.has(normalizedExt) ? normalizedExt : 'mp3';
+  const resolvedDir = path.resolve(outputDir);
+  fs.mkdirSync(resolvedDir, { recursive: true });
+
+  const rawStem = path
+    .basename(String(filename || `kinoflow_audio_${Date.now()}`))
+    .replace(/\.[^.]+$/, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+  const finalName = `${rawStem || `kinoflow_audio_${Date.now()}`}.${safeExt}`;
+  const destPath = path.resolve(resolvedDir, finalName);
+  if (!destPath.startsWith(resolvedDir + path.sep)) {
+    throw new Error('Недопустимый путь сохранения аудиофайла.');
+  }
+
+  fs.writeFileSync(destPath, bytes);
+  return { localPath: destPath, name: finalName };
 }

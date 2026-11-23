@@ -24,6 +24,7 @@ import {
   findFfmpeg,
   isHttpUrl,
   mergeSegments,
+  saveGeneratedAudioFile,
 } from './filmMerger.js';
 import {
   appendStartupLog,
@@ -616,6 +617,25 @@ function registerFilmIpc() {
         filename,
       });
       return { ok: true, localPath };
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) };
+    }
+  });
+
+  ipcMain.handle('film:save-audio', async (_event, payload) => {
+    const audioBase64 = typeof payload?.audioBase64 === 'string' ? payload.audioBase64 : '';
+    const extension = typeof payload?.extension === 'string' ? payload.extension : 'mp3';
+    const suggestedName =
+      typeof payload?.suggestedName === 'string' ? payload.suggestedName : undefined;
+    try {
+      const audioDir = path.join(app.getPath('videos'), 'KinoFlow Studio', 'audio');
+      const { localPath, name } = saveGeneratedAudioFile({
+        audioBase64,
+        outputDir: audioDir,
+        extension,
+        filename: suggestedName,
+      });
+      return { ok: true, path: localPath, name };
     } catch (error) {
       return { ok: false, error: String(error?.message ?? error) };
     }

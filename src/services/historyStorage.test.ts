@@ -4,12 +4,14 @@ import {
   DEFAULT_COMFY_INSTANCES_SETTINGS,
   HISTORY_AUTOSAVE_INTERVAL_MS,
   loadHistory,
+  loadSavedSettings,
   normalizeComfyInstancesSettings,
   sanitizeHistoryItems,
   saveHistory,
+  saveSettings,
   startHistoryAutoSave,
 } from './historyStorage';
-import type { GenerationHistoryItem } from '../types/video';
+import type { GenerationHistoryItem, GenerationSettings } from '../types/video';
 
 test('sanitizeHistoryItems normalizes legacy entries missing characters or numeric fields', () => {
   const result = sanitizeHistoryItems([
@@ -220,4 +222,102 @@ test('normalizeComfyInstancesSettings validates GPU index (0-7) and port (1024-6
   );
 });
 
+test('sanitizeHistoryItems preserves optional audio fields on items and segments while staying backward-compatible', () => {
+  const result = sanitizeHistoryItems([
+    {
+      id: 'with-audio',
+      videoUrl: 'http://127.0.0.1:8188/view?filename=rain.mp4',
+      prompt: 'Rainy street',
+      soundDescription: 'rain and thunder',
+      hasAudio: true,
+      audioUrl: 'http://127.0.0.1:8188/view?filename=rain.wav',
+      segments: [
+        {
+          index: 1,
+          mode: 't2v',
+          startSec: 0,
+          endSec: 5,
+          promptId: 'seg-1',
+          videoUrl: 'http://127.0.0.1:8188/view?filename=rain.mp4',
+          filename: 'rain.mp4',
+          subfolder: '',
+          fileType: 'output',
+          seed: 42,
+          hasAudio: true,
+          audioUrl: 'http://127.0.0.1:8188/view?filename=rain.wav',
+        },
+      ],
+    },
+    {
+      id: 'legacy-no-audio',
+      videoUrl: 'http://127.0.0.1:8188/view?filename=silent.mp4',
+      prompt: 'Silent clip',
+    },
+  ]);
 
+  assert.equal(result.length, 2);
+  assert.equal(result[0].hasAudio, true);
+  assert.equal(result[0].soundDescription, 'rain and thunder');
+  assert.equal(result[0].audioUrl, 'http://127.0.0.1:8188/view?filename=rain.wav');
+  assert.equal(result[0].segments?.[0].hasAudio, true);
+  assert.equal(result[0].segments?.[0].audioUrl, 'http://127.0.0.1:8188/view?filename=rain.wav');
+
+  assert.equal(result[1].hasAudio, undefined);
+  assert.equal(result[1].audioUrl, undefined);
+  assert.equal(result[1].soundDescription, undefined);
+});
+
+test('saveSettings never persists audioApiKey to localStorage', () => {
+  const store = new Map<string, string>();
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
+  (globalThis as unknown as { window: unknown }).window = {
+    localStorage: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        store.set(key, value);
+      },
+    },
+  };
+
+  try {
+    const sampleSettings: GenerationSettings = {
+      serverUrl: 'http://127.0.0.1:8188',
+      comfyDir: 'C:\\ComfyUI',
+      mode: 't2v',
+      modelId: 'auto',
+      durationSec: 5,
+      fps: 16,
+      frames: 81,
+      resolutionId: '832x480',
+      width: 832,
+      height: 480,
+      steps: 28,
+      seed: 42,
+      seedLocked: false,
+      upscale1080p: false,
+      rifeEnabled: false,
+      rifeTargetFps: 24,
+      shootingStyle: 'arri-35mm',
+      soundDescription: 'ocean waves',
+      generateAudio: true,
+      audioStrategy: 'external-api',
+      audioApiEndpoint: 'https://audio.example.com/generate',
+      audioApiKey: 'super-secret-key',
+    };
+
+    saveSettings(sampleSettings);
+    const rawStored = [...store.values()].join('\n');
+    assert.ok(!rawStored.includes('super-secret-key'), 'audioApiKey must never be stored in localStorage');
+
+    const restored = loadSavedSettings();
+    assert.equal(restored?.soundDescription, 'ocean waves');
+    assert.equal(restored?.audioApiEndpoint, 'https://audio.example.com/generate');
+    assert.equal(restored?.audioApiKey, undefined);
+  } finally {
+    if (originalWindow === undefined) {
+      delete (globalThis as unknown as { window?: unknown }).window;
+    } else {
+      (globalThis as unknown as { window: unknown }).window = originalWindow;
+    }
+  }
+});

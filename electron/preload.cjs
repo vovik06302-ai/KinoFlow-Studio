@@ -60,6 +60,8 @@ contextBridge.exposeInMainWorld('kinoflowFilm', {
     ipcRenderer.invoke('film:extract-last-frame', { videoUrl }),
   archiveClip: (videoUrl, filename) =>
     ipcRenderer.invoke('film:archive-clip', { videoUrl, filename }),
+  saveGeneratedAudio: (audioBase64, extension, suggestedName) =>
+    ipcRenderer.invoke('film:save-audio', { audioBase64, extension, suggestedName }),
   showFile: (filePath) => ipcRenderer.invoke('film:show-file', filePath),
   onProgress: (callback) => {
     const listener = (_event, payload) => {

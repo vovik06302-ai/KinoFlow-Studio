@@ -14,7 +14,7 @@ import {
 } from './modelCatalog.js';
 import { ModelDownloadManager, scanModelsDirectory } from './modelDownloader.js';
 
-test('REQUIRED_MODELS includes official Wan 2.2 T2V/I2V FP8, UMT5-XXL FP8, Wan 2.1 VAE, plus optional 5B and 4x-UltraSharp models', () => {
+test('REQUIRED_MODELS includes official Wan 2.2 T2V/I2V FP8, UMT5-XXL FP8, Wan 2.1 VAE, plus optional 5B, RealESRGAN_x2plus, and 4x-UltraSharp models', () => {
   const filenames = REQUIRED_MODELS.map((m) => m.filename);
   assert.ok(filenames.includes('wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors'));
   assert.ok(filenames.includes('wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors'));
@@ -24,6 +24,7 @@ test('REQUIRED_MODELS includes official Wan 2.2 T2V/I2V FP8, UMT5-XXL FP8, Wan 2
   assert.ok(filenames.includes('wan_2.1_vae.safetensors'));
   assert.ok(filenames.includes('wan2.2_ti2v_5B_fp16.safetensors'));
   assert.ok(filenames.includes('wan2.2_vae.safetensors'));
+  assert.ok(filenames.includes('RealESRGAN_x2plus.pth'));
   assert.ok(filenames.includes('4x-UltraSharp.pth'));
   assert.ok(!filenames.includes('clip_vision_h.safetensors'));
 
@@ -39,7 +40,7 @@ test('REQUIRED_MODELS includes official Wan 2.2 T2V/I2V FP8, UMT5-XXL FP8, Wan 2
   const coreModels = REQUIRED_MODELS.filter((m) => !m.optional);
   const optionalModels = REQUIRED_MODELS.filter((m) => m.optional);
   assert.equal(coreModels.length, 6);
-  assert.equal(optionalModels.length, 7);
+  assert.equal(optionalModels.length, 8);
 });
 
 test('evaluateModelFileStatus detects installed, size_mismatch, partial, missing, and tolerates minor metadata drift on large models', () => {

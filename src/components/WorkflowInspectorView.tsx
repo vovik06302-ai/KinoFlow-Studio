@@ -200,11 +200,13 @@ export function WorkflowInspectorView({
           </p>
         </div>
         <div>
-          <p className="font-mono text-xs font-medium text-[#F6AD55]">Узлы 55–57, 58, 60–61</p>
+          <p className="font-mono text-xs font-medium text-[#F6AD55]">Узлы 55–58, 60–61, 80–82</p>
           <p className="mt-1 text-xs leading-relaxed text-[#94A3B8]">
-            Постобработка: нейро-апскейл <span className="font-mono">1080p</span> (#55–57),
-            интерполяция <span className="font-mono">RIFE VFI</span> (#58) и экспорт{' '}
-            <span className="font-mono">.mp4</span> через VHS_VideoCombine или встроенные CreateVideo + SaveVideo.
+            Постобработка: нейро-апскейл <span className="font-mono">1080p</span> (#55–57,
+            RealESRGAN_x2plus), интерполяция <span className="font-mono">RIFE VFI</span> (#58),
+            синхронный звук <span className="font-mono">MMAudio</span> (#80–82 → вход audio) и
+            экспорт <span className="font-mono">.mp4</span> через VHS_VideoCombine или CreateVideo +
+            SaveVideo.
           </p>
         </div>
       </div>

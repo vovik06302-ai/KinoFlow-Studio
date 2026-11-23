@@ -69,6 +69,10 @@ export type SamplerName = 'uni_pc' | 'euler' | 'dpmpp_2m' | 'res_multistep';
 
 export type SchedulerName = 'simple' | 'beta' | 'normal' | 'sgm_uniform';
 
+export type AudioGenerationStrategy = 'comfy-audiocraft' | 'external-api';
+
+export type AudioCraftModelType = 'audiogen' | 'musicgen';
+
 export interface ComfyInstanceSettings {
   gpuIndex: number;
   port: number;
@@ -119,6 +123,18 @@ export interface GenerationSettings {
   offlineMode?: boolean;
   localLlmUrl?: string;
   localLlmModel?: string;
+  /** Optional text prompt for soundtrack/SFX generation (AudioCraft or external audio API). */
+  soundDescription?: string;
+  /** When true, generates audio alongside video (Strategy A) or enables audio workflow controls. */
+  generateAudio?: boolean;
+  /** Strategy A: ComfyUI-AudioCraft nodes in workflow; Strategy B: external audio generation API fallback. */
+  audioStrategy?: AudioGenerationStrategy;
+  /** AudioCraft model variant for Strategy A: AudioGen (SFX/ambient) or MusicGen (music). */
+  audioCraftModel?: AudioCraftModelType;
+  /** Configurable HTTP endpoint for external audio generation API (Strategy B fallback). */
+  audioApiEndpoint?: string;
+  /** Optional API key / Bearer token for external audio generation API (kept in memory only). */
+  audioApiKey?: string;
 }
 
 export type ConnectionStatus = 'idle' | 'checking' | 'online' | 'offline';
@@ -173,6 +189,8 @@ export interface GeneratedSegment {
   fileType: string;
   seed: number;
   localFilePath?: string;
+  audioUrl?: string;
+  hasAudio?: boolean;
 }
 
 export interface HistoryCharacterSummary {
@@ -211,4 +229,7 @@ export interface GenerationHistoryItem {
   segments?: GeneratedSegment[];
   isExtendedFromId?: string;
   localFilePath?: string;
+  soundDescription?: string;
+  audioUrl?: string;
+  hasAudio?: boolean;
 }

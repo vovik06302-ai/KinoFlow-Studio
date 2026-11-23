@@ -308,6 +308,51 @@ test('analyzePreflight validates LoraLoaderModelOnly files and fetchAvailableLor
   assert.deepEqual(loras, ['style_a.safetensors', 'style_b.safetensors']);
 });
 
+test('analyzePreflight checks MMAudio nodes only when Strategy A audio generation is active', () => {
+  const audioSettings: GenerationSettings = {
+    ...settings,
+    durationSec: 5,
+    generateAudio: true,
+    audioStrategy: 'comfy-audiocraft',
+    soundDescription: 'rain and thunder',
+  };
+  const graphsA = buildPreflightGraphs({
+    settings: audioSettings,
+    hasStartFrame: false,
+    isContinuation: false,
+  });
 
+  const missingAudioNode = analyzePreflight(graphsA, fullObjectInfo());
+  assert.equal(missingAudioNode.ok, false);
+  for (const expectedClass of [
+    'MMAudioModelLoader',
+    'MMAudioFeatureUtilsLoader',
+    'MMAudioSampler',
+  ]) {
+    assert.ok(
+      missingAudioNode.missingNodes.some(
+        (n) => n.classType === expectedClass && n.pack === 'ComfyUI-MMAudio',
+      ),
+      `missing node ${expectedClass} must be reported with ComfyUI-MMAudio hint`,
+    );
+  }
 
+  const installedAudioNode = analyzePreflight(
+    graphsA,
+    fullObjectInfo({
+      MMAudioModelLoader: {},
+      MMAudioFeatureUtilsLoader: {},
+      MMAudioSampler: {},
+    }),
+  );
+  assert.equal(installedAudioNode.ok, true);
 
+  // Strategy B (external-api) does not require MMAudio nodes in ComfyUI
+  const graphsB = buildPreflightGraphs({
+    settings: { ...audioSettings, audioStrategy: 'external-api' },
+    hasStartFrame: false,
+    isContinuation: false,
+  });
+  const externalReport = analyzePreflight(graphsB, fullObjectInfo());
+  assert.equal(externalReport.ok, true);
+});

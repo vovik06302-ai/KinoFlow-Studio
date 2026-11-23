@@ -35,6 +35,11 @@ export interface ElectronFilmBridge {
     videoUrl: string,
     filename?: string,
   ) => Promise<{ ok: boolean; localPath?: string; error?: string }>;
+  saveGeneratedAudio?: (
+    audioBase64: string,
+    extension: string,
+    suggestedName?: string,
+  ) => Promise<{ ok: boolean; path?: string; name?: string; error?: string }>;
   showFile: (filePath: string) => Promise<{ ok: boolean }>;
   onProgress: (callback: (event: FilmMergeProgress) => void) => () => void;
 }

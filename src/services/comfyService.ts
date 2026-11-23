@@ -6,6 +6,8 @@ import type { VideoExportBackend } from './preflightService';
 import { buildSegmentPrompt } from './storyboard';
 import type { CameraPresetId, StoryboardShot } from './storyboard';
 import type {
+  AudioCraftModelType,
+  AudioGenerationStrategy,
   BaseModelId,
   CharacterReference,
   ConnectionInfo,
@@ -24,6 +26,14 @@ import type {
   StartFrameReference,
   VideoModelOption,
 } from '../types/video';
+
+export const MMAUDIO_NODE_IDS = ['80', '81', '82'] as const;
+export const AUDIO_NODE_ID = '82';
+
+export const AUDIOCRAFT_MODEL_MAP: Record<AudioCraftModelType, string> = {
+  audiogen: 'facebook/audiogen-medium',
+  musicgen: 'facebook/musicgen-medium',
+};
 
 export const SEGMENT_DURATION_SEC = 5;
 export const DURATION_CHOICES: DurationChoice[] = [5, 10, 15, 20, 25, 30];
@@ -279,6 +289,8 @@ export interface WorkflowBuildInput {
   /** Optional validated format/codec for ComfyUI Core SaveVideo node. */
   coreVideoFormat?: string;
   coreVideoCodec?: string;
+  /** Optional sound prompt override (defaults to settings.soundDescription). */
+  soundDescription?: string;
 }
 
 export interface AutoModelRouteDecision {
@@ -1218,11 +1230,11 @@ export function buildWorkflowFromTemplate(
   const effectiveSampler: SamplerName =
     input.settings.samplerName && SAMPLER_CHOICES.includes(input.settings.samplerName)
       ? input.settings.samplerName
-      : 'uni_pc';
+      : 'euler';
   const effectiveScheduler: SchedulerName =
     input.settings.scheduler && SCHEDULER_CHOICES.includes(input.settings.scheduler)
       ? input.settings.scheduler
-      : 'simple';
+      : 'beta';
 
   if (graph['40']) {
     graph['40'].inputs.model = ['101', 0];
@@ -1297,6 +1309,127 @@ export function buildWorkflowFromTemplate(
     delete graph['58'];
   }
 
+  const audioStrategy: AudioGenerationStrategy = input.settings.audioStrategy ?? 'comfy-audiocraft';
+  const effectiveSoundPrompt = (
+    input.soundDescription ??
+    input.settings.soundDescription ??
+    ''
+  ).trim();
+  const shouldAttachComfyAudio = Boolean(
+    input.settings.generateAudio && audioStrategy === 'comfy-audiocraft',
+  );
+  let audioLink: [string, number] | undefined;
+
+  if (shouldAttachComfyAudio) {
+    const segmentDurationSec = Number(
+      Math.max(1, (segmentFrames - 1) / Math.max(1, input.settings.fps)).toFixed(2),
+    );
+
+    if (graph['80']) {
+      if (typeof graph['80'].inputs.mmaudio_model === 'string') {
+        graph['80'].inputs.mmaudio_model = resolveOption(
+          'MMAudioModelLoader',
+          'mmaudio_model',
+          graph['80'].inputs.mmaudio_model,
+        );
+      }
+    } else {
+      graph['80'] = {
+        class_type: 'MMAudioModelLoader',
+        inputs: {
+          mmaudio_model: resolveOption(
+            'MMAudioModelLoader',
+            'mmaudio_model',
+            'mmaudio_large_44k_v2_fp16.safetensors',
+          ),
+          base_precision: 'fp16',
+        },
+        _meta: {
+          title: 'MMAudio Model Loader',
+        },
+      };
+    }
+
+    if (graph['81']) {
+      for (const field of ['vae_model', 'synchformer_model', 'clip_model'] as const) {
+        if (typeof graph['81'].inputs[field] === 'string') {
+          graph['81'].inputs[field] = resolveOption(
+            'MMAudioFeatureUtilsLoader',
+            field,
+            graph['81'].inputs[field] as string,
+          );
+        }
+      }
+    } else {
+      graph['81'] = {
+        class_type: 'MMAudioFeatureUtilsLoader',
+        inputs: {
+          vae_model: resolveOption(
+            'MMAudioFeatureUtilsLoader',
+            'vae_model',
+            'mmaudio_vae_44k_fp16.safetensors',
+          ),
+          synchformer_model: resolveOption(
+            'MMAudioFeatureUtilsLoader',
+            'synchformer_model',
+            'mmaudio_synchformer_fp16.safetensors',
+          ),
+          clip_model: resolveOption(
+            'MMAudioFeatureUtilsLoader',
+            'clip_model',
+            'apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors',
+          ),
+          mode: '44k',
+          precision: 'fp16',
+        },
+        _meta: {
+          title: 'MMAudio Feature Utils Loader',
+        },
+      };
+    }
+
+    const existingSamplerNode = graph[AUDIO_NODE_ID];
+    if (existingSamplerNode) {
+      const rawPrompt =
+        typeof existingSamplerNode.inputs.prompt === 'string'
+          ? existingSamplerNode.inputs.prompt
+          : '{{AUDIO_PROMPT}}';
+      existingSamplerNode.inputs.mmaudio_model = ['80', 0];
+      existingSamplerNode.inputs.feature_utils = ['81', 0];
+      existingSamplerNode.inputs.images = ['50', 0];
+      existingSamplerNode.inputs.duration = segmentDurationSec;
+      existingSamplerNode.inputs.seed = seed;
+      existingSamplerNode.inputs.prompt = rawPrompt.includes('{{AUDIO_PROMPT}}')
+        ? rawPrompt.replace('{{AUDIO_PROMPT}}', effectiveSoundPrompt)
+        : effectiveSoundPrompt;
+    } else {
+      graph[AUDIO_NODE_ID] = {
+        class_type: 'MMAudioSampler',
+        inputs: {
+          mmaudio_model: ['80', 0],
+          feature_utils: ['81', 0],
+          images: ['50', 0],
+          duration: segmentDurationSec,
+          steps: 25,
+          cfg: 4.5,
+          seed,
+          prompt: effectiveSoundPrompt,
+          negative_prompt: '',
+          mask_away_clip: false,
+          force_offload: true,
+        },
+        _meta: {
+          title: 'MMAudio Video-to-Audio Sampler',
+        },
+      };
+    }
+    audioLink = [AUDIO_NODE_ID, 0];
+  } else {
+    for (const nodeId of MMAUDIO_NODE_IDS) {
+      delete graph[nodeId];
+    }
+  }
+
   const outputFps = computeOutputFps(input.settings.fps, input.settings.rifeEnabled);
   const resolvedPrefix =
     input.filenamePrefix ||
@@ -1307,12 +1440,16 @@ export function buildWorkflowFromTemplate(
         : 'kinoflow_t2v_seg');
 
   if (input.videoExportBackend === 'core') {
+    const createVideoInputs: Record<string, unknown> = {
+      images: currentImageLink,
+      fps: outputFps,
+    };
+    if (audioLink) {
+      createVideoInputs.audio = audioLink;
+    }
     graph['60'] = {
       class_type: 'CreateVideo',
-      inputs: {
-        images: currentImageLink,
-        fps: outputFps,
-      },
+      inputs: createVideoInputs,
       _meta: {
         title: 'Create Video (ComfyUI Core)',
       },
@@ -1332,6 +1469,11 @@ export function buildWorkflowFromTemplate(
   } else if (graph['60']) {
     graph['60'].inputs.images = currentImageLink;
     graph['60'].inputs.frame_rate = outputFps;
+    if (audioLink) {
+      graph['60'].inputs.audio = audioLink;
+    } else {
+      delete graph['60'].inputs.audio;
+    }
     if (input.isChainedIntermediate && input.settings.preventColorDrift) {
       graph['60'].inputs.crf = 14;
     }
@@ -1999,6 +2141,52 @@ export function extractVideoOutputFromHistory(
   };
 }
 
+/**
+ * Extracts an optional standalone audio output URL from a ComfyUI /history response
+ * if any node exported an audio file (e.g. .mp3 / .wav / .flac / .ogg).
+ */
+export function extractAudioOutputFromHistory(
+  historyPayload: Record<string, unknown>,
+  promptId: string,
+  serverUrl: string,
+): string | null {
+  const entry = historyPayload[promptId] as
+    | {
+        outputs?: Record<
+          string,
+          {
+            audio?: MediaFileEntry[];
+            audios?: MediaFileEntry[];
+          }
+        >;
+      }
+    | undefined;
+
+  if (!entry?.outputs) {
+    return null;
+  }
+
+  const candidates: MediaFileEntry[] = [];
+  for (const out of Object.values(entry.outputs)) {
+    if (Array.isArray(out.audio)) candidates.push(...out.audio);
+    if (Array.isArray(out.audios)) candidates.push(...out.audios);
+  }
+
+  const preferred =
+    candidates.find((item) => /\.(mp3|wav|ogg|flac|m4a)$/i.test(item.filename ?? '')) ??
+    candidates[0];
+  if (!preferred?.filename) {
+    return null;
+  }
+
+  return getViewUrl(
+    serverUrl,
+    preferred.filename,
+    preferred.subfolder ?? '',
+    preferred.type ?? 'output',
+  );
+}
+
 interface HistoryStatusEntry {
   status_str?: string;
   completed?: boolean;
@@ -2227,7 +2415,7 @@ interface ExecuteSingleSegmentOptions {
 
 async function executeSingleComfyWorkflow(
   opts: ExecuteSingleSegmentOptions,
-): Promise<{ promptId: string; output: VideoOutputInfo }> {
+): Promise<{ promptId: string; output: VideoOutputInfo; audioUrl?: string }> {
   const { serverUrl, workflow, signal, onSegmentProgress } = opts;
   const clientId =
     typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -2268,146 +2456,59 @@ async function executeSingleComfyWorkflow(
     transport: wsConnected ? 'ws' : 'polling',
   });
 
-  const output = await new Promise<VideoOutputInfo>((resolve, reject) => {
-    let settled = false;
-    let pollTimer: ReturnType<typeof setInterval> | null = null;
-    let pollingFraction = 0.12;
+  const output = await new Promise<{ video: VideoOutputInfo; audioUrl?: string }>(
+    (resolve, reject) => {
+      let settled = false;
+      let pollTimer: ReturnType<typeof setInterval> | null = null;
+      let pollingFraction = 0.12;
 
-    const cleanup = () => {
-      if (pollTimer) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-      }
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close();
-      }
-      signal.removeEventListener('abort', onAbort);
-    };
+      const cleanup = () => {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.close();
+        }
+        signal.removeEventListener('abort', onAbort);
+      };
 
-    const fail = (err: Error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(err);
-    };
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      };
 
-    const succeed = (info: VideoOutputInfo) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      onSegmentProgress(1, {
-        promptId,
-        transport: wsConnected ? 'ws' : 'polling',
-      });
-      resolve(info);
-    };
-
-    const fetchResultAndFinish = async () => {
-      try {
-        onSegmentProgress(0.95, {
+      const succeed = (info: VideoOutputInfo, audioUrl?: string) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        onSegmentProgress(1, {
           promptId,
           transport: wsConnected ? 'ws' : 'polling',
-          detail: 'Получение MP4 из /history и /view...',
         });
-        const history = await getHistory(serverUrl, promptId);
-        const execError = extractExecutionErrorFromHistory(history, promptId);
-        if (execError) {
-          fail(new Error(execError));
-          return true;
-        }
-        const video = extractVideoOutputFromHistory(history, promptId, serverUrl);
-        if (video) {
-          succeed(video);
-          return true;
-        }
-        if (isHistoryPromptFinished(history, promptId)) {
-          fail(
-            new Error(
-              'ComfyUI завершил выполнение графа, но не вернул видеофайл. Проверьте узел экспорта видео (VHS_VideoCombine / SaveVideo) в консоли ComfyUI.',
-            ),
-          );
-          return true;
-        }
-        return false;
-      } catch (err) {
-        fail(err instanceof Error ? err : new Error('Ошибка чтения /history'));
-        return true;
-      }
-    };
+        resolve({ video: info, audioUrl });
+      };
 
-    const onAbort = () => {
-      interruptGeneration(serverUrl).catch(() => {});
-      fail(new Error('Генерация прервана пользователем.'));
-    };
-
-    signal.addEventListener('abort', onAbort);
-
-    let consecutivePollErrors = 0;
-    const MAX_CONSECUTIVE_POLL_ERRORS = 6;
-
-    if (ws && wsConnected) {
-      ws.onmessage = (event) => {
-        consecutivePollErrors = 0;
-        if (typeof event.data !== 'string') return;
-        const parsed = parseComfyWsEvent(event.data, promptId);
-
-        if (parsed.type === 'execution_error' || parsed.type === 'execution_interrupted') {
-          fail(new Error(parsed.errorMessage || 'Ошибка выполнения графа ComfyUI.'));
-          return;
-        }
-
-        if (parsed.type === 'progress' && parsed.max && parsed.max > 0) {
-          const stepVal = parsed.value ?? 0;
-          const fraction = Math.min(0.92, 0.1 + (stepVal / parsed.max) * 0.82);
-          const nodeTitle =
-            (parsed.nodeId && workflow[parsed.nodeId]?._meta?.title) || 'Сэмплинг диффузии';
-          onSegmentProgress(fraction, {
+      const fetchResultAndFinish = async () => {
+        try {
+          onSegmentProgress(0.95, {
             promptId,
-            transport: 'ws',
-            currentStep: stepVal,
-            totalSteps: parsed.max,
-            currentNodeTitle: nodeTitle,
-            detail: `${nodeTitle} · шаг ${stepVal} из ${parsed.max}`,
+            transport: wsConnected ? 'ws' : 'polling',
+            detail: 'Получение MP4 из /history и /view...',
           });
-        } else if (parsed.type === 'executing') {
-          if (parsed.nodeId === null) {
-            void fetchResultAndFinish();
-          } else if (parsed.nodeId) {
-            const nodeTitle = workflow[parsed.nodeId]?._meta?.title || `Узел #${parsed.nodeId}`;
-            pollingFraction = Math.min(0.88, pollingFraction + 0.06);
-            onSegmentProgress(pollingFraction, {
-              promptId,
-              transport: 'ws',
-              currentNodeTitle: nodeTitle,
-              detail: `Выполняется: ${nodeTitle}`,
-            });
-          }
-        }
-      };
-
-      ws.onerror = () => {
-        wsConnected = false;
-      };
-      ws.onclose = () => {
-        wsConnected = false;
-      };
-    }
-
-    pollTimer = setInterval(async () => {
-      if (settled) return;
-      try {
-        const history = await getHistory(serverUrl, promptId);
-        consecutivePollErrors = 0;
-        if (history[promptId]) {
+          const history = await getHistory(serverUrl, promptId);
           const execError = extractExecutionErrorFromHistory(history, promptId);
           if (execError) {
             fail(new Error(execError));
-            return;
+            return true;
           }
           const video = extractVideoOutputFromHistory(history, promptId, serverUrl);
           if (video) {
-            succeed(video);
-            return;
+            const audioUrl = extractAudioOutputFromHistory(history, promptId, serverUrl) ?? undefined;
+            succeed(video, audioUrl);
+            return true;
           }
           if (isHistoryPromptFinished(history, promptId)) {
             fail(
@@ -2415,31 +2516,123 @@ async function executeSingleComfyWorkflow(
                 'ComfyUI завершил выполнение графа, но не вернул видеофайл. Проверьте узел экспорта видео (VHS_VideoCombine / SaveVideo) в консоли ComfyUI.',
               ),
             );
+            return true;
+          }
+          return false;
+        } catch (err) {
+          fail(err instanceof Error ? err : new Error('Ошибка чтения /history'));
+          return true;
+        }
+      };
+
+      const onAbort = () => {
+        interruptGeneration(serverUrl).catch(() => {});
+        fail(new Error('Генерация прервана пользователем.'));
+      };
+
+      signal.addEventListener('abort', onAbort);
+
+      let consecutivePollErrors = 0;
+      const MAX_CONSECUTIVE_POLL_ERRORS = 6;
+
+      if (ws && wsConnected) {
+        ws.onmessage = (event) => {
+          consecutivePollErrors = 0;
+          if (typeof event.data !== 'string') return;
+          const parsed = parseComfyWsEvent(event.data, promptId);
+
+          if (parsed.type === 'execution_error' || parsed.type === 'execution_interrupted') {
+            fail(new Error(parsed.errorMessage || 'Ошибка выполнения графа ComfyUI.'));
             return;
           }
-        }
-        if (!wsConnected) {
-          pollingFraction = Math.min(0.88, pollingFraction + 0.04);
-          onSegmentProgress(pollingFraction, {
-            promptId,
-            transport: 'polling',
-            detail: 'Опрос /history ComfyUI...',
-          });
-        }
-      } catch {
-        consecutivePollErrors += 1;
-        if (!wsConnected && consecutivePollErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
-          fail(
-            new Error(
-              'Соединение с ComfyUI потеряно во время генерации. Возможно, сервер ComfyUI аварийно завершился (нехватка VRAM или ошибка драйвера) — проверьте журнал ComfyUI.',
-            ),
-          );
-        }
-      }
-    }, 2200);
-  });
 
-  return { promptId, output };
+          if (parsed.type === 'progress' && parsed.max && parsed.max > 0) {
+            const stepVal = parsed.value ?? 0;
+            const fraction = Math.min(0.92, 0.1 + (stepVal / parsed.max) * 0.82);
+            const nodeTitle =
+              (parsed.nodeId && workflow[parsed.nodeId]?._meta?.title) || 'Сэмплинг диффузии';
+            onSegmentProgress(fraction, {
+              promptId,
+              transport: 'ws',
+              currentStep: stepVal,
+              totalSteps: parsed.max,
+              currentNodeTitle: nodeTitle,
+              detail: `${nodeTitle} · шаг ${stepVal} из ${parsed.max}`,
+            });
+          } else if (parsed.type === 'executing') {
+            if (parsed.nodeId === null) {
+              void fetchResultAndFinish();
+            } else if (parsed.nodeId) {
+              const nodeTitle = workflow[parsed.nodeId]?._meta?.title || `Узел #${parsed.nodeId}`;
+              pollingFraction = Math.min(0.88, pollingFraction + 0.06);
+              onSegmentProgress(pollingFraction, {
+                promptId,
+                transport: 'ws',
+                currentNodeTitle: nodeTitle,
+                detail: `Выполняется: ${nodeTitle}`,
+              });
+            }
+          }
+        };
+
+        ws.onerror = () => {
+          wsConnected = false;
+        };
+        ws.onclose = () => {
+          wsConnected = false;
+        };
+      }
+
+      pollTimer = setInterval(async () => {
+        if (settled) return;
+        try {
+          const history = await getHistory(serverUrl, promptId);
+          consecutivePollErrors = 0;
+          if (history[promptId]) {
+            const execError = extractExecutionErrorFromHistory(history, promptId);
+            if (execError) {
+              fail(new Error(execError));
+              return;
+            }
+            const video = extractVideoOutputFromHistory(history, promptId, serverUrl);
+            if (video) {
+              const audioUrl =
+                extractAudioOutputFromHistory(history, promptId, serverUrl) ?? undefined;
+              succeed(video, audioUrl);
+              return;
+            }
+            if (isHistoryPromptFinished(history, promptId)) {
+              fail(
+                new Error(
+                  'ComfyUI завершил выполнение графа, но не вернул видеофайл. Проверьте узел экспорта видео (VHS_VideoCombine / SaveVideo) в консоли ComfyUI.',
+                ),
+              );
+              return;
+            }
+          }
+          if (!wsConnected) {
+            pollingFraction = Math.min(0.88, pollingFraction + 0.04);
+            onSegmentProgress(pollingFraction, {
+              promptId,
+              transport: 'polling',
+              detail: 'Опрос /history ComfyUI...',
+            });
+          }
+        } catch {
+          consecutivePollErrors += 1;
+          if (!wsConnected && consecutivePollErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+            fail(
+              new Error(
+                'Соединение с ComfyUI потеряно во время генерации. Возможно, сервер ComfyUI аварийно завершился (нехватка VRAM или ошибка драйвера) — проверьте журнал ComfyUI.',
+              ),
+            );
+          }
+        }
+      }, 2200);
+    },
+  );
+
+  return { promptId, output: output.video, audioUrl: output.audioUrl };
 }
 
 export interface RunGenerationOptions {
@@ -2456,6 +2649,8 @@ export interface RunGenerationOptions {
   endFrame?: StartFrameReference | null;
   isContinuation?: boolean;
   fallbackCharacterAnchors?: WorkflowBuildCharacter[];
+  /** Optional translated/effective sound description override for AudioCraft node. */
+  soundDescription?: string;
   signal: AbortSignal;
   onProgress: (progress: GenerationProgress) => void;
   /** Called right after each 5s segment completes so UI can checkpoint partial multi-segment renders. */
@@ -2467,6 +2662,8 @@ export interface RunGenerationResult {
   output: VideoOutputInfo;
   segments: GeneratedSegment[];
   uploadedNames: string[];
+  hasAudio?: boolean;
+  audioUrl?: string;
 }
 
 /**
@@ -2491,6 +2688,7 @@ export async function runComfyGeneration(
     endFrame,
     isContinuation = false,
     fallbackCharacterAnchors = [],
+    soundDescription,
     signal,
     onProgress,
     onSegmentCompleted,
@@ -2668,7 +2866,9 @@ export async function runComfyGeneration(
       resolvedModelNames,
       coreVideoFormat,
       coreVideoCodec,
+      soundDescription,
     });
+    const workflowHasAudio = Boolean(workflow[AUDIO_NODE_ID]);
 
     const segStartPct = baseProgressOffset + (segment.index - 1) * perSegmentBudget;
 
@@ -2684,7 +2884,7 @@ export async function runComfyGeneration(
       message: segmentLabel,
     });
 
-    const { promptId, output } = await executeSingleComfyWorkflow({
+    const { promptId, output, audioUrl } = await executeSingleComfyWorkflow({
       serverUrl,
       workflow,
       segment,
@@ -2733,6 +2933,7 @@ export async function runComfyGeneration(
       }
     }
 
+    const segmentHasAudio = Boolean(workflowHasAudio || audioUrl);
     const completedSegment: GeneratedSegment = {
       index: segment.index,
       mode: route.workflowMode,
@@ -2745,6 +2946,8 @@ export async function runComfyGeneration(
       fileType: output.type,
       seed: segmentSeed,
       ...(localFilePath ? { localFilePath } : {}),
+      ...(audioUrl ? { audioUrl } : {}),
+      ...(segmentHasAudio ? { hasAudio: true } : {}),
     };
     renderedSegments.push(completedSegment);
     onSegmentCompleted?.(completedSegment, [...renderedSegments]);
@@ -2798,6 +3001,7 @@ export async function runComfyGeneration(
         : 'Видео готово к просмотру',
   });
 
+  const hasAnyAudio = renderedSegments.some((seg) => Boolean(seg.hasAudio || seg.audioUrl));
   return {
     promptId: lastSegment.promptId,
     output: {
@@ -2808,5 +3012,7 @@ export async function runComfyGeneration(
     },
     segments: renderedSegments,
     uploadedNames: uploadedChars.map((c) => c.imageFilename),
+    ...(hasAnyAudio ? { hasAudio: true } : {}),
+    ...(lastSegment.audioUrl ? { audioUrl: lastSegment.audioUrl } : {}),
   };
 }

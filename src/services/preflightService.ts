@@ -28,6 +28,22 @@ export const NODE_PACK_HINTS: Record<string, NodePackHint> = {
     pack: 'ComfyUI-Frame-Interpolation',
     url: 'https://github.com/Fannovel16/ComfyUI-Frame-Interpolation',
   },
+  AudioCraft: {
+    pack: 'ComfyUI-AudioCraft',
+    url: 'https://github.com/WASasquatch/ComfyUI-AudioCraft',
+  },
+  MMAudioModelLoader: {
+    pack: 'ComfyUI-MMAudio',
+    url: 'https://github.com/kijai/ComfyUI-MMAudio',
+  },
+  MMAudioFeatureUtilsLoader: {
+    pack: 'ComfyUI-MMAudio',
+    url: 'https://github.com/kijai/ComfyUI-MMAudio',
+  },
+  MMAudioSampler: {
+    pack: 'ComfyUI-MMAudio',
+    url: 'https://github.com/kijai/ComfyUI-MMAudio',
+  },
 };
 
 /** Loader nodes whose combo input lists files installed on the server. */

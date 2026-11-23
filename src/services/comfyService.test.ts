@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  AUDIO_NODE_ID,
   AUTO_I2V_LOW_MODEL_FILE,
+  MMAUDIO_NODE_IDS,
   AUTO_I2V_MODEL_FILE,
   AUTO_T2V_LOW_MODEL_FILE,
   AUTO_T2V_MODEL_FILE,
@@ -18,6 +20,7 @@ import {
   computeUpscaleTargetSize,
   createComfyFetch,
   describeAutoRoutingStatus,
+  extractAudioOutputFromHistory,
   extractExecutionErrorFromHistory,
   extractVideoOutputFromHistory,
   formatGenerationErrorMessage,
@@ -948,6 +951,165 @@ test('validateGenerationParams validates CFG, flowShift, sampler, scheduler, cus
   );
   assert.equal(isWindowsFlushErrno22Error('CUDA out of memory'), false);
 });
+
+test('buildWorkflowFromTemplate preserves photorealism defaults in T2V and I2V (RealESRGAN_x2plus, tile_size 512, euler/beta, RIFE fast_mode false)', () => {
+  for (const mode of ['t2v', 'i2v'] as const) {
+    const graph = buildWorkflowFromTemplate({
+      settings: {
+        ...baseSettings,
+        mode,
+        upscale1080p: true,
+        rifeEnabled: true,
+      },
+      positivePrompt: 'Cinematic close-up portrait in natural window light',
+      negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+      startFrameFilename: mode === 'i2v' ? 'start.png' : undefined,
+      characters: [],
+    });
+
+    assert.equal(graph['40'].inputs.sampler_name, 'euler');
+    assert.equal(graph['40'].inputs.scheduler, 'beta');
+    assert.equal(graph['41'].inputs.sampler_name, 'euler');
+    assert.equal(graph['41'].inputs.scheduler, 'beta');
+    assert.equal(graph['50'].inputs.tile_size, 512);
+    assert.equal(graph['55'].inputs.model_name, 'RealESRGAN_x2plus.pth');
+    assert.equal(graph['58'].inputs.fast_mode, false);
+  }
+});
+
+test('buildWorkflowFromTemplate wires MMAudio nodes #80–#82 into T2V and I2V when generateAudio is enabled', () => {
+  const t2vWithAudio = buildWorkflowFromTemplate({
+    settings: {
+      ...baseSettings,
+      mode: 't2v',
+      generateAudio: true,
+      audioStrategy: 'comfy-audiocraft',
+      soundDescription: 'soft rain and distant thunder, quiet ambient synth',
+      seed: 777,
+    },
+    positivePrompt: 'Rainy street at night',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    characters: [],
+  });
+
+  assert.equal(t2vWithAudio['80'].class_type, 'MMAudioModelLoader');
+  assert.equal(t2vWithAudio['81'].class_type, 'MMAudioFeatureUtilsLoader');
+  assert.equal(t2vWithAudio[AUDIO_NODE_ID].class_type, 'MMAudioSampler');
+  assert.deepEqual(t2vWithAudio[AUDIO_NODE_ID].inputs.mmaudio_model, ['80', 0]);
+  assert.deepEqual(t2vWithAudio[AUDIO_NODE_ID].inputs.feature_utils, ['81', 0]);
+  assert.deepEqual(t2vWithAudio[AUDIO_NODE_ID].inputs.images, ['50', 0]);
+  assert.equal(
+    t2vWithAudio[AUDIO_NODE_ID].inputs.prompt,
+    'soft rain and distant thunder, quiet ambient synth',
+  );
+  assert.equal(t2vWithAudio[AUDIO_NODE_ID].inputs.duration, 5);
+  assert.equal(t2vWithAudio[AUDIO_NODE_ID].inputs.seed, 777);
+  assert.deepEqual(t2vWithAudio['60'].inputs.audio, [AUDIO_NODE_ID, 0]);
+
+  const i2vWithAudio = buildWorkflowFromTemplate({
+    settings: {
+      ...baseSettings,
+      mode: 'i2v',
+      generateAudio: true,
+      audioStrategy: 'comfy-audiocraft',
+      soundDescription: 'дождь и гром',
+    },
+    soundDescription: 'heavy rain and thunder',
+    positivePrompt: 'Storm over ocean cliffs',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    startFrameFilename: 'start.png',
+    characters: [],
+  });
+
+  assert.equal(i2vWithAudio['80'].class_type, 'MMAudioModelLoader');
+  assert.equal(i2vWithAudio['81'].class_type, 'MMAudioFeatureUtilsLoader');
+  assert.equal(i2vWithAudio[AUDIO_NODE_ID].class_type, 'MMAudioSampler');
+  assert.deepEqual(i2vWithAudio[AUDIO_NODE_ID].inputs.images, ['50', 0]);
+  assert.equal(i2vWithAudio[AUDIO_NODE_ID].inputs.prompt, 'heavy rain and thunder');
+  assert.deepEqual(i2vWithAudio['60'].inputs.audio, [AUDIO_NODE_ID, 0]);
+
+  // Empty prompt still replaces {{AUDIO_PROMPT}} cleanly for video-synced MMAudio Foley
+  const videoOnlyFoley = buildWorkflowFromTemplate({
+    settings: {
+      ...baseSettings,
+      generateAudio: true,
+      audioStrategy: 'comfy-audiocraft',
+      soundDescription: '   ',
+    },
+    positivePrompt: 'Footsteps on gravel',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    characters: [],
+  });
+  assert.equal(videoOnlyFoley[AUDIO_NODE_ID].inputs.prompt, '');
+  assert.deepEqual(videoOnlyFoley['60'].inputs.audio, [AUDIO_NODE_ID, 0]);
+
+  const coreWithAudio = buildWorkflowFromTemplate({
+    settings: {
+      ...baseSettings,
+      generateAudio: true,
+      audioStrategy: 'comfy-audiocraft',
+      soundDescription: 'crackling campfire',
+    },
+    positivePrompt: 'Campfire at dusk',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    characters: [],
+    videoExportBackend: 'core',
+  });
+  assert.equal(coreWithAudio['60'].class_type, 'CreateVideo');
+  assert.deepEqual(coreWithAudio['60'].inputs.audio, [AUDIO_NODE_ID, 0]);
+});
+
+test('buildWorkflowFromTemplate strips all MMAudio nodes (#80–#82) when audio is disabled or external-api', () => {
+  const disabledGraph = buildWorkflowFromTemplate({
+    settings: {
+      ...baseSettings,
+      generateAudio: false,
+      soundDescription: 'rain and thunder',
+    },
+    positivePrompt: 'Quiet forest',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    characters: [],
+  });
+  for (const nodeId of MMAUDIO_NODE_IDS) {
+    assert.equal(disabledGraph[nodeId], undefined);
+  }
+  assert.equal(disabledGraph['60'].inputs.audio, undefined);
+
+  const externalStrategyGraph = buildWorkflowFromTemplate({
+    settings: {
+      ...baseSettings,
+      generateAudio: true,
+      audioStrategy: 'external-api',
+      soundDescription: 'rain and thunder',
+    },
+    positivePrompt: 'Quiet forest',
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    characters: [],
+  });
+  for (const nodeId of MMAUDIO_NODE_IDS) {
+    assert.equal(externalStrategyGraph[nodeId], undefined);
+  }
+  assert.equal(externalStrategyGraph['60'].inputs.audio, undefined);
+});
+
+test('extractAudioOutputFromHistory resolves audio file URLs from ComfyUI history outputs', () => {
+  const history = {
+    'p-audio': {
+      outputs: {
+        '80': {
+          audio: [{ filename: 'sound_0001.wav', subfolder: 'audio', type: 'output' }],
+        },
+      },
+    },
+  };
+  const url = extractAudioOutputFromHistory(history, 'p-audio', 'http://127.0.0.1:8188');
+  assert.equal(
+    url,
+    'http://127.0.0.1:8188/view?filename=sound_0001.wav&subfolder=audio&type=output',
+  );
+  assert.equal(extractAudioOutputFromHistory({}, 'missing', 'http://127.0.0.1:8188'), null);
+});
+
 
 
 

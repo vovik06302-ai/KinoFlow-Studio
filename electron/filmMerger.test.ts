@@ -12,6 +12,8 @@ import {
   findFfmpeg,
   isHttpUrl,
   mergeSegments,
+  mp4HasAudioTrack,
+  saveGeneratedAudioFile,
 } from './filmMerger.js';
 
 function makeSpawn(exitCode: number, calls: Array<{ command: string; args: string[] }> = []) {
@@ -184,3 +186,133 @@ test('buildExtractLastFrameArgs, extractLastFrameWithFfmpeg, and archiveVideoCli
   }
 });
 
+test('mergeSegments forwards audioPath and audioVolume (0–2.0) into FFmpeg arguments', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kf-merge-audio-'));
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const audioFile = path.join(root, 'rain_ambience.mp3');
+  fs.writeFileSync(audioFile, 'fake-mp3');
+
+  try {
+    await mergeSegments({
+      segmentUrls: ['http://127.0.0.1:8188/view?filename=seg1.mp4', 'http://127.0.0.1:8188/view?filename=seg2.mp4'],
+      outputPath: path.join(root, 'film_with_audio.mp4'),
+      audioPath: audioFile,
+      audioVolume: 1.65,
+      ffmpegPath: 'ffmpeg',
+      tempRoot: root,
+      spawnImpl: makeSpawn(0, calls),
+      downloadImpl: async ({ destPath }: { destPath: string }) => {
+        fs.writeFileSync(destPath, 'video');
+      },
+    });
+
+    assert.equal(calls.length, 1);
+    const args = calls[0].args;
+    assert.ok(args.includes('-stream_loop'));
+    assert.ok(args.includes(audioFile));
+    assert.ok(args.includes('aac'));
+    const filter = args[args.indexOf('-filter_complex') + 1];
+    assert.match(filter, /\[2:a\]volume=1\.65\[outa\]/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('saveGeneratedAudioFile writes validated base64 audio into outputDir and sanitizes filenames', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kf-save-audio-'));
+  const audioDir = path.join(root, 'audio');
+  const payload = Buffer.from('ID3-audio-bytes').toString('base64');
+
+  try {
+    const saved = saveGeneratedAudioFile({
+      audioBase64: payload,
+      outputDir: audioDir,
+      extension: 'wav',
+      filename: '../../evil path/storm sound.wav',
+    });
+    assert.equal(path.dirname(saved.localPath), path.resolve(audioDir));
+    assert.equal(saved.name, 'storm_sound.wav');
+    assert.equal(fs.readFileSync(saved.localPath, 'utf8'), 'ID3-audio-bytes');
+
+    // Unsupported extension falls back safely to mp3
+    const fallbackExt = saveGeneratedAudioFile({
+      audioBase64: payload,
+      outputDir: audioDir,
+      extension: 'exe',
+      filename: 'track.exe',
+    });
+    assert.ok(fallbackExt.name.endsWith('.mp3'));
+
+    assert.throws(
+      () => saveGeneratedAudioFile({ audioBase64: '', outputDir: audioDir }),
+      /Пустые аудиоданные/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('buildMergeArgs preserves segment audio tracks with smooth acrossfade joins when preserveSegmentAudio is enabled', () => {
+  const args3 = buildMergeArgs({
+    inputs: ['s1.mp4', 's2.mp4', 's3.mp4'],
+    output: 'out_crossfade.mp4',
+    preserveSegmentAudio: true,
+    audioCrossfadeSec: 0.25,
+  });
+  const filter3 = args3[args3.indexOf('-filter_complex') + 1];
+  assert.match(filter3, /\[0:a\]asetpts=PTS-STARTPTS\[a0\]/);
+  assert.match(filter3, /\[1:a\]asetpts=PTS-STARTPTS\[a1\]/);
+  assert.match(filter3, /\[2:a\]asetpts=PTS-STARTPTS\[a2\]/);
+  assert.match(filter3, /\[a0\]\[a1\]acrossfade=d=0\.25:c1=tri:c2=tri\[af1\]/);
+  assert.match(filter3, /\[af1\]\[a2\]acrossfade=d=0\.25:c1=tri:c2=tri\[outa\]/);
+  assert.ok(args3.includes('[outa]'));
+  assert.ok(args3.includes('aac'));
+  assert.equal(args3.includes('-an'), false);
+
+  const args1 = buildMergeArgs({
+    inputs: ['only.mp4'],
+    output: 'single.mp4',
+    preserveSegmentAudio: true,
+  });
+  const filter1 = args1[args1.indexOf('-filter_complex') + 1];
+  assert.match(filter1, /\[0:a\]asetpts=PTS-STARTPTS\[outa\]/);
+  assert.equal(args1.includes('-an'), false);
+});
+
+test('mergeSegments auto-detects embedded MP4 audio tracks and applies acrossfade without external audioPath', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kf-merge-acrossfade-'));
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const fakeMp4WithAudio = Buffer.concat([
+    Buffer.from('\x00\x00\x00\x18ftypmp42'),
+    Buffer.from('moovtrakmdiahdlr\x00\x00\x00\x00\x00\x00\x00\x00sounSoundHandler'),
+  ]);
+
+  try {
+    const samplePath = path.join(root, 'sample.mp4');
+    fs.writeFileSync(samplePath, fakeMp4WithAudio);
+    assert.equal(mp4HasAudioTrack(samplePath), true);
+
+    await mergeSegments({
+      segmentUrls: [
+        'http://127.0.0.1:8188/view?filename=seg1.mp4',
+        'http://127.0.0.1:8188/view?filename=seg2.mp4',
+      ],
+      outputPath: path.join(root, 'film_mmaudio.mp4'),
+      ffmpegPath: 'ffmpeg',
+      tempRoot: root,
+      spawnImpl: makeSpawn(0, calls),
+      downloadImpl: async ({ destPath }: { destPath: string }) => {
+        fs.writeFileSync(destPath, fakeMp4WithAudio);
+      },
+    });
+
+    assert.equal(calls.length, 1);
+    const args = calls[0].args;
+    const filter = args[args.indexOf('-filter_complex') + 1];
+    assert.match(filter, /\[a0\]\[a1\]acrossfade=d=0\.15:c1=tri:c2=tri\[outa\]/);
+    assert.ok(args.includes('aac'));
+    assert.equal(args.includes('-an'), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

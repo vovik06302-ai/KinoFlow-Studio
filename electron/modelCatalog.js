@@ -105,10 +105,24 @@ export const REQUIRED_MODELS = [
     optional: true,
   },
   {
-    id: 'upscale-4x-ultrasharp',
-    name: 'Апскейлер 4x-UltraSharp (1080p)',
+    id: 'upscale-realesrgan-x2plus',
+    name: 'Апскейлер RealESRGAN_x2plus (1080p)',
     category: 'Upscale · 1080p (Доп.)',
-    description: 'Модель детализации для переключателя «Кино-апскейл до 1080p» в настройках студии.',
+    description:
+      'Основная модель для «Кино-апскейл до 1080p»: естественная детализация кожи и оптики без пластикового перешарпа.',
+    filename: 'RealESRGAN_x2plus.pth',
+    targetSubfolder: 'models/upscale_models',
+    repoId: 'dtarnow/UPscaler',
+    downloadUrl:
+      'https://huggingface.co/dtarnow/UPscaler/resolve/main/RealESRGAN_x2plus.pth',
+    expectedSizeBytes: 67061725,
+    optional: true,
+  },
+  {
+    id: 'upscale-4x-ultrasharp',
+    name: 'Апскейлер 4x-UltraSharp (Альтернатива)',
+    category: 'Upscale · 1080p (Доп.)',
+    description: 'Альтернативный резкий апскейлер (4x) для архитектуры и контрастных сцен.',
     filename: '4x-UltraSharp.pth',
     targetSubfolder: 'models/upscale_models',
     repoId: 'Kim2091/UltraSharp',

@@ -8,6 +8,7 @@ import {
   RefreshCw,
   ShieldCheck,
   Unlock,
+  Volume2,
   Zap,
 } from 'lucide-react';
 import {
@@ -27,6 +28,7 @@ import {
 } from '../services/comfyService';
 import { estimateVramUsage } from '../services/vramEstimator';
 import type {
+  AudioGenerationStrategy,
   BaseModelId,
   ConnectionInfo,
   DurationChoice,
@@ -584,7 +586,7 @@ export function SettingsPanel({
                 Кино-апскейл до 1080p
               </span>
               <span className="mt-0.5 block font-mono text-[11px] tabular-nums text-[#64748B]">
-                Узлы #55–57 · 4x-UltraSharp → {upscaleTarget.width}×{upscaleTarget.height}
+                Узлы #55–57 · RealESRGAN_x2plus → {upscaleTarget.width}×{upscaleTarget.height}
               </span>
             </div>
             <input
@@ -628,6 +630,107 @@ export function SettingsPanel({
             )}
           </div>
         </div>
+      </div>
+
+      {/* Audio Generation Strategy Block (Strategy A: ComfyUI-MMAudio / Strategy B: External API) */}
+      <div className="mt-5 border-t border-[#1E2330] pt-5">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <h3 className="flex items-center gap-1.5 text-xs font-semibold tracking-tight text-[#F1F5F9]">
+            <Volume2 className="h-3.5 w-3.5 text-[#F6AD55]" aria-hidden="true" />
+            <span>Генерация звука</span>
+          </h3>
+          <span className="font-mono text-[11px] text-[#64748B]">
+            {(settings.audioStrategy ?? 'comfy-audiocraft') === 'external-api'
+              ? 'Внешний API'
+              : 'ComfyUI · MMAudio'}
+          </span>
+        </div>
+
+        <div
+          role="group"
+          aria-label="Стратегия генерации звука"
+          className="grid grid-cols-2 gap-1 rounded-md border border-[#262C3A] bg-[#141821] p-1"
+        >
+          {(
+            [
+              { id: 'comfy-audiocraft', label: 'Ноды ComfyUI (MMAudio)' },
+              { id: 'external-api', label: 'Внешний API (fallback)' },
+            ] as const
+          ).map((option) => {
+            const isSelected = (settings.audioStrategy ?? 'comfy-audiocraft') === option.id;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                disabled={disabled}
+                aria-pressed={isSelected}
+                onClick={() =>
+                  onChange({ audioStrategy: option.id as AudioGenerationStrategy })
+                }
+                className={`rounded px-2 py-1.5 text-[11px] font-medium transition-colors focus-visible:outline-2 focus-visible:outline-[#E58E26] disabled:opacity-50 ${
+                  isSelected
+                    ? 'bg-[#252C3D] text-[#F8FAFC]'
+                    : 'text-[#94A3B8] hover:bg-[#1E2433] hover:text-[#F1F5F9]'
+                }`}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {(settings.audioStrategy ?? 'comfy-audiocraft') === 'comfy-audiocraft' ? (
+          <div className="mt-3 space-y-2">
+            <p className="text-[11px] leading-relaxed text-[#64748B]">
+              Подключает узлы <span className="font-mono text-[#94A3B8]">#80–82 MMAudio</span>{' '}
+              (кадры из <span className="font-mono text-[#94A3B8]">#50 VAEDecodeTiled</span> +
+              промпт <span className="font-mono text-[#94A3B8]">{'{{AUDIO_PROMPT}}'}</span>) к входу{' '}
+              <span className="font-mono text-[#94A3B8]">audio</span> узла{' '}
+              <span className="font-mono text-[#94A3B8]">#60 VHS_VideoCombine</span>. Если ноды{' '}
+              <span className="font-mono text-[#94A3B8]">ComfyUI-MMAudio</span> не установлены,
+              переключитесь на «Внешний API».
+            </p>
+          </div>
+        ) : (
+          <div className="mt-3 space-y-2.5">
+            <div>
+              <label
+                htmlFor="audio-api-endpoint"
+                className="mb-1 block text-[11px] text-[#94A3B8]"
+              >
+                Endpoint внешнего API генерации звука
+              </label>
+              <input
+                id="audio-api-endpoint"
+                type="url"
+                value={settings.audioApiEndpoint ?? ''}
+                disabled={disabled}
+                onChange={(e) => onChange({ audioApiEndpoint: e.target.value })}
+                placeholder="https://api.example.com/v1/audio/generate"
+                className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 font-mono text-xs text-[#F1F5F9] placeholder-[#475569] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
+              />
+            </div>
+            <div>
+              <label htmlFor="audio-api-key" className="mb-1 block text-[11px] text-[#94A3B8]">
+                API-ключ (опционально · только в памяти сессии)
+              </label>
+              <input
+                id="audio-api-key"
+                type="password"
+                autoComplete="off"
+                value={settings.audioApiKey ?? ''}
+                disabled={disabled}
+                onChange={(e) => onChange({ audioApiKey: e.target.value })}
+                placeholder="Bearer-токен для Authorization"
+                className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 font-mono text-xs text-[#F1F5F9] placeholder-[#475569] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
+              />
+            </div>
+            <p className="text-[11px] leading-relaxed text-[#64748B]">
+              Нажмите «Сгенерировать звук отдельно» под полем «Звук (описание)». Готовый MP3/WAV
+              автоматически подключится к склейке фильма. Ключ не сохраняется в localStorage.
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Collapsible Advanced Settings (Auto-Model Routing default) */}
@@ -688,8 +791,8 @@ export function SettingsPanel({
                       cfg: settings.fastLightX2V ? 1.0 : 3.5,
                       cfgLow: settings.fastLightX2V ? 1.0 : 3.5,
                       flowShift: 5.0,
-                      samplerName: 'uni_pc',
-                      scheduler: 'simple',
+                      samplerName: 'euler',
+                      scheduler: 'beta',
                     })
                   }
                   className="text-[11px] text-[#64748B] transition-colors hover:text-[#CBD5E1] disabled:opacity-50"
@@ -785,7 +888,7 @@ export function SettingsPanel({
                   </label>
                   <select
                     id="sampler-select"
-                    value={settings.samplerName ?? 'uni_pc'}
+                    value={settings.samplerName ?? 'euler'}
                     disabled={disabled}
                     onChange={(e) => onChange({ samplerName: e.target.value as SamplerName })}
                     className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 font-mono text-xs text-[#F1F5F9] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"
@@ -811,7 +914,7 @@ export function SettingsPanel({
                   </label>
                   <select
                     id="scheduler-select"
-                    value={settings.scheduler ?? 'simple'}
+                    value={settings.scheduler ?? 'beta'}
                     disabled={disabled}
                     onChange={(e) => onChange({ scheduler: e.target.value as SchedulerName })}
                     className="w-full rounded-md border border-[#262C3A] bg-[#141821] px-2.5 py-1.5 font-mono text-xs text-[#F1F5F9] focus:border-[#E58E26] focus:outline-none disabled:opacity-60"

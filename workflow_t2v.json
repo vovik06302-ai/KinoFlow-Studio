@@ -133,8 +133,8 @@
       "noise_seed": 42,
       "steps": 28,
       "cfg": 4.5,
-      "sampler_name": "uni_pc",
-      "scheduler": "simple",
+      "sampler_name": "euler",
+      "scheduler": "beta",
       "start_at_step": 0,
       "end_at_step": 10,
       "return_with_leftover_noise": "enable"
@@ -167,8 +167,8 @@
       "noise_seed": 42,
       "steps": 28,
       "cfg": 3.5,
-      "sampler_name": "uni_pc",
-      "scheduler": "simple",
+      "sampler_name": "euler",
+      "scheduler": "beta",
       "start_at_step": 10,
       "end_at_step": 10000,
       "return_with_leftover_noise": "disable"
@@ -189,24 +189,24 @@
         "4",
         0
       ],
-      "tile_size": 256,
+      "tile_size": 512,
       "overlap": 64,
       "temporal_size": 64,
       "temporal_overlap": 8
     },
     "_meta": {
       "title": "Tiled Video VAE Decode",
-      "comment": "Тайловое декодирование латентов. Отсюда кадры идут либо в постобработку (узлы 55–58), либо напрямую в экспорт MP4 (#60)."
+      "comment": "Тайловое декодирование латентов. Отсюда кадры идут либо в постобработку (узлы 55–58), либо напрямую в экспорт MP4 (#60), а также в MMAudioSampler (#82)."
     }
   },
   "55": {
     "class_type": "UpscaleModelLoader",
     "inputs": {
-      "model_name": "4x-UltraSharp.pth"
+      "model_name": "RealESRGAN_x2plus.pth"
     },
     "_meta": {
       "title": "Cinema Upscale Model Loader (1080p Post-Processing)",
-      "comment": "МЕСТО ПОДКЛЮЧЕНИЯ АПСКЕЙЛА: загружает нейросетевую модель апскейла (например, 4x-UltraSharp.pth или RealESRGAN_x2plus.pth). Активируется переключателем «Кино-апскейл до 1080p»; если выключен — узлы 55–57 вырезаются."
+      "comment": "МЕСТО ПОДКЛЮЧЕНИЯ АПСКЕЙЛА: загружает нейросетевую модель апскейла (по умолчанию RealESRGAN_x2plus.pth — без пластикового перешарпа на коже). Активируется переключателем «Кино-апскейл до 1080p»; если выключен — узлы 55–57 вырезаются."
     }
   },
   "56": {
@@ -253,13 +253,67 @@
       "ckpt_name": "rife49.pth",
       "clear_cache_after_n_frames": 10,
       "multiplier": 2,
-      "fast_mode": true,
+      "fast_mode": false,
       "ensemble": true,
       "scale_factor": 1.0
     },
     "_meta": {
       "title": "RIFE Frame Interpolation (24 / 30 FPS Smoothness)",
-      "comment": "МЕСТО ПОДКЛЮЧЕНИЯ RIFE: интерполяция промежуточных кадров (ComfyUI-Frame-Interpolation, rife49.pth) для плавного кинодвижения 24 или 30 FPS. Если переключатель выключен — узел #58 удаляется автоматически."
+      "comment": "МЕСТО ПОДКЛЮЧЕНИЯ RIFE: интерполяция промежуточных кадров (ComfyUI-Frame-Interpolation, rife49.pth, fast_mode: false) для плавного кинодвижения без артефактов. Если переключатель выключен — узел #58 удаляется автоматически."
+    }
+  },
+  "80": {
+    "class_type": "MMAudioModelLoader",
+    "inputs": {
+      "mmaudio_model": "mmaudio_large_44k_v2_fp16.safetensors",
+      "base_precision": "fp16"
+    },
+    "_meta": {
+      "title": "MMAudio Model Loader",
+      "comment": "Загружает модель MMAudio (ComfyUI-MMAudio) для синхронной генерации звука по видеокадрам и промпту. Узлы #80–#82 удаляются автоматически, если звук выключен."
+    }
+  },
+  "81": {
+    "class_type": "MMAudioFeatureUtilsLoader",
+    "inputs": {
+      "vae_model": "mmaudio_vae_44k_fp16.safetensors",
+      "synchformer_model": "mmaudio_synchformer_fp16.safetensors",
+      "clip_model": "apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors",
+      "mode": "44k",
+      "precision": "fp16"
+    },
+    "_meta": {
+      "title": "MMAudio Feature Utils Loader",
+      "comment": "Загружает VAE, Synchformer и CLIP-энкодер для MMAudio. Удаляется автоматически, если звук выключен."
+    }
+  },
+  "82": {
+    "class_type": "MMAudioSampler",
+    "inputs": {
+      "mmaudio_model": [
+        "80",
+        0
+      ],
+      "feature_utils": [
+        "81",
+        0
+      ],
+      "images": [
+        "50",
+        0
+      ],
+      "duration": 5,
+      "steps": 25,
+      "cfg": 4.5,
+      "seed": 42,
+      "prompt": "{{AUDIO_PROMPT}}",
+      "negative_prompt": "",
+      "mask_away_clip": false,
+      "force_offload": true
+    },
+    "_meta": {
+      "title": "MMAudio Video-to-Audio Sampler",
+      "comment": "СЮДА ПОДСТАВЛЯЕТСЯ {{AUDIO_PROMPT}} и длительность видео; принимает кадры из #50 (VAEDecodeTiled) и передаёт звук в #60 (VHS_VideoCombine). Узлы #80–#82 удаляются автоматически, если звук выключен."
     }
   },
   "60": {
@@ -267,6 +321,10 @@
     "inputs": {
       "images": [
         "58",
+        0
+      ],
+      "audio": [
+        "82",
         0
       ],
       "frame_rate": 24,
@@ -281,7 +339,7 @@
     },
     "_meta": {
       "title": "Export MP4 Segment (VideoHelperSuite)",
-      "comment": "Вход images автоматически перелинковывается на #58 (RIFE), #57 (1080p Upscale) или #50 (VAEDecodeTiled). frame_rate подстраивается под выбранный базовый или RIFE FPS."
+      "comment": "Вход images автоматически перелинковывается на #58 (RIFE), #57 (1080p Upscale) или #50 (VAEDecodeTiled). Вход audio подключается к #82 (MMAudioSampler) при включённой генерации звука."
     }
   }
 }

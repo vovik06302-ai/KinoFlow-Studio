@@ -24,6 +24,33 @@ function sanitizeCharacters(raw: unknown): HistoryCharacterSummary[] {
     }));
 }
 
+function sanitizeSegments(raw: unknown): GenerationHistoryItem['segments'] {
+  if (!Array.isArray(raw)) return undefined;
+  const clean = raw
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === 'object')
+    .filter((entry) => typeof entry.videoUrl === 'string' && entry.videoUrl.length > 0)
+    .map((entry, idx) => ({
+      index: typeof entry.index === 'number' && entry.index > 0 ? entry.index : idx + 1,
+      mode: (entry.mode === 'i2v' ? 'i2v' : 't2v') as 't2v' | 'i2v',
+      startSec: typeof entry.startSec === 'number' ? entry.startSec : idx * 5,
+      endSec: typeof entry.endSec === 'number' ? entry.endSec : (idx + 1) * 5,
+      promptId: typeof entry.promptId === 'string' ? entry.promptId : `seg-${idx + 1}`,
+      videoUrl: entry.videoUrl as string,
+      filename: typeof entry.filename === 'string' ? entry.filename : `seg_${idx + 1}.mp4`,
+      subfolder: typeof entry.subfolder === 'string' ? entry.subfolder : '',
+      fileType: typeof entry.fileType === 'string' ? entry.fileType : 'output',
+      seed: typeof entry.seed === 'number' && Number.isFinite(entry.seed) ? entry.seed : 0,
+      ...(typeof entry.localFilePath === 'string' && entry.localFilePath
+        ? { localFilePath: entry.localFilePath }
+        : {}),
+      ...(typeof entry.audioUrl === 'string' && entry.audioUrl
+        ? { audioUrl: entry.audioUrl }
+        : {}),
+      ...(typeof entry.hasAudio === 'boolean' ? { hasAudio: entry.hasAudio } : {}),
+    }));
+  return clean.length > 0 ? clean : undefined;
+}
+
 export function sanitizeHistoryItems(raw: unknown): GenerationHistoryItem[] {
   if (!Array.isArray(raw)) return [];
   const clean: GenerationHistoryItem[] = [];
@@ -34,6 +61,7 @@ export function sanitizeHistoryItems(raw: unknown): GenerationHistoryItem[] {
       continue;
     }
     const fps = item.fps === 24 ? 24 : 16;
+    const segments = sanitizeSegments(item.segments);
     clean.push({
       ...(item as unknown as GenerationHistoryItem),
       id: item.id,
@@ -60,9 +88,12 @@ export function sanitizeHistoryItems(raw: unknown): GenerationHistoryItem[] {
       subfolder: typeof item.subfolder === 'string' ? item.subfolder : '',
       fileType: typeof item.fileType === 'string' ? item.fileType : 'output',
       serverUrl: typeof item.serverUrl === 'string' ? item.serverUrl : 'http://127.0.0.1:8188',
-      segments: Array.isArray(item.segments)
-        ? (item.segments as GenerationHistoryItem['segments'])
-        : undefined,
+      segments,
+      ...(typeof item.soundDescription === 'string' && item.soundDescription.trim()
+        ? { soundDescription: item.soundDescription }
+        : {}),
+      ...(typeof item.audioUrl === 'string' && item.audioUrl ? { audioUrl: item.audioUrl } : {}),
+      ...(typeof item.hasAudio === 'boolean' ? { hasAudio: item.hasAudio } : {}),
     });
   }
   return clean.slice(0, MAX_HISTORY_ITEMS);
@@ -196,7 +227,9 @@ export function loadSavedSettings(): Partial<GenerationSettings> | null {
 
 export function saveSettings(settings: GenerationSettings): void {
   try {
-    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    // Keep external API keys strictly in memory and never persist them to localStorage.
+    const { audioApiKey: _omittedApiKey, ...persistable } = settings;
+    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(persistable));
   } catch {
     // Ignore storage quota errors
   }

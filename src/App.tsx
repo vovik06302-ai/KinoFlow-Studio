@@ -13,6 +13,7 @@ import { ScenePresetBar } from './components/ScenePresetBar';
 import { StoryboardPanel } from './components/StoryboardPanel';
 import { UpdateControl } from './components/UpdateControl';
 import { WorkflowInspectorView } from './components/WorkflowInspectorView';
+import { generateExternalAudio } from './services/audioService';
 import {
   QUEUE_SERVER_CHOICES,
   loadQueueServers,
@@ -80,7 +81,10 @@ import {
   translatePromptToEnglishViaLocalLlm,
 } from './services/promptService';
 import { extractLastFrameFromVideo } from './utils/videoFrameUtils';
+import type { SelectedAudioTrack } from './types/film';
 import type {
+  AudioCraftModelType,
+  AudioGenerationStrategy,
   BaseModelId,
   CharacterReference,
   ConnectionInfo,
@@ -131,13 +135,19 @@ function getInitialSettings(): GenerationSettings {
     localLlmUrl: '',
     localLlmModel: '',
     fastLightX2V: false,
-    samplerName: 'uni_pc',
-    scheduler: 'simple',
+    samplerName: 'euler',
+    scheduler: 'beta',
     customLoraName: '',
     customLoraStrength: 0.8,
     autoCropStartFrame: true,
     preventColorDrift: true,
     autoTranslateRuPrompt: true,
+    soundDescription: '',
+    generateAudio: false,
+    audioStrategy: 'comfy-audiocraft',
+    audioCraftModel: 'audiogen',
+    audioApiEndpoint: '',
+    audioApiKey: '',
   };
 
   const saved = loadSavedSettings();
@@ -165,12 +175,16 @@ function getInitialSettings(): GenerationSettings {
     : 'arri-35mm';
   const validSampler: SamplerName = SAMPLER_CHOICES.includes(saved.samplerName as SamplerName)
     ? (saved.samplerName as SamplerName)
-    : 'uni_pc';
+    : 'euler';
   const validScheduler: SchedulerName = SCHEDULER_CHOICES.includes(
     saved.scheduler as SchedulerName,
   )
     ? (saved.scheduler as SchedulerName)
-    : 'simple';
+    : 'beta';
+  const validAudioStrategy: AudioGenerationStrategy =
+    saved.audioStrategy === 'external-api' ? 'external-api' : 'comfy-audiocraft';
+  const validAudioCraftModel: AudioCraftModelType =
+    saved.audioCraftModel === 'musicgen' ? 'musicgen' : 'audiogen';
 
   return {
     ...defaults,
@@ -203,6 +217,12 @@ function getInitialSettings(): GenerationSettings {
     autoCropStartFrame: saved.autoCropStartFrame !== false,
     preventColorDrift: saved.preventColorDrift !== false,
     autoTranslateRuPrompt: saved.autoTranslateRuPrompt !== false,
+    soundDescription: typeof saved.soundDescription === 'string' ? saved.soundDescription : '',
+    generateAudio: Boolean(saved.generateAudio),
+    audioStrategy: validAudioStrategy,
+    audioCraftModel: validAudioCraftModel,
+    audioApiEndpoint: typeof saved.audioApiEndpoint === 'string' ? saved.audioApiEndpoint : '',
+    audioApiKey: '',
   };
 }
 
@@ -235,6 +255,13 @@ export default function App() {
   const [isTranslating, setIsTranslating] = useState(false);
   const [enhanceError, setEnhanceError] = useState<string | null>(null);
   const [enhanceSourceLabel, setEnhanceSourceLabel] = useState<string | null>(null);
+
+  const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
+  const [audioError, setAudioError] = useState<string | null>(null);
+  const [generatedAudioPreviewUrl, setGeneratedAudioPreviewUrl] = useState<string | null>(null);
+  const [generatedAudioFilename, setGeneratedAudioFilename] = useState<string | null>(null);
+  const [generatedAudioSavedPath, setGeneratedAudioSavedPath] = useState<string | null>(null);
+  const [externalAudioTrack, setExternalAudioTrack] = useState<SelectedAudioTrack | null>(null);
 
   const [progress, setProgress] = useState<GenerationProgress>(IDLE_PROGRESS);
   const [generationError, setGenerationError] = useState<string | null>(null);
@@ -273,6 +300,8 @@ export default function App() {
   startFrameRef.current = startFrame;
   const endFrameRef = useRef<StartFrameReference | null>(endFrame);
   endFrameRef.current = endFrame;
+  const generatedAudioPreviewRef = useRef<string | null>(generatedAudioPreviewUrl);
+  generatedAudioPreviewRef.current = generatedAudioPreviewUrl;
 
   const isGenerating =
     progress.phase === 'uploading' ||
@@ -329,6 +358,9 @@ export default function App() {
       }
       if (endFrameRef.current) {
         URL.revokeObjectURL(endFrameRef.current.previewUrl);
+      }
+      if (generatedAudioPreviewRef.current) {
+        URL.revokeObjectURL(generatedAudioPreviewRef.current);
       }
     };
   }, []);
@@ -494,6 +526,99 @@ export default function App() {
     setEnhanceSourceLabel(null);
     setGenerationError(null);
   }, []);
+
+  const handleSoundDescriptionChange = useCallback((value: string) => {
+    setSettings((prev) => ({ ...prev, soundDescription: value }));
+    setAudioError(null);
+  }, []);
+
+  const handleGenerateAudioChange = useCallback((enabled: boolean) => {
+    setSettings((prev) => ({ ...prev, generateAudio: enabled }));
+    setAudioError(null);
+  }, []);
+
+  const handleSwitchToExternalAudio = useCallback(() => {
+    setSettings((prev) => ({
+      ...prev,
+      audioStrategy: 'external-api',
+      generateAudio: true,
+    }));
+    setPreflightReport(null);
+    setGenerationError(null);
+    setAudioError(null);
+  }, []);
+
+  const handleGenerateStandaloneAudio = useCallback(async () => {
+    const rawSound = (settings.soundDescription ?? '').trim();
+    if (!rawSound) {
+      setAudioError('Введите описание звука перед генерацией.');
+      return;
+    }
+
+    setIsGeneratingAudio(true);
+    setAudioError(null);
+    try {
+      let promptForAudioApi = rawSound;
+      if (
+        settings.autoTranslateRuPrompt !== false &&
+        settings.localLlmUrl?.trim() &&
+        containsCyrillic(rawSound)
+      ) {
+        const translated = await translatePromptToEnglishViaLocalLlm(rawSound, {
+          url: settings.localLlmUrl,
+          model: settings.localLlmModel,
+        });
+        if (translated) {
+          promptForAudioApi = translated;
+        }
+      }
+
+      const generated = await generateExternalAudio({
+        endpoint: settings.audioApiEndpoint ?? '',
+        apiKey: settings.audioApiKey,
+        prompt: promptForAudioApi,
+        durationSec: settings.durationSec,
+      });
+
+      setGeneratedAudioPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return generated.objectUrl;
+      });
+      setGeneratedAudioFilename(generated.filename);
+      setGeneratedAudioSavedPath(null);
+
+      const filmBridge = window.kinoflowFilm;
+      if (filmBridge?.saveGeneratedAudio) {
+        const saved = await filmBridge.saveGeneratedAudio(
+          generated.base64,
+          generated.extension,
+          generated.filename,
+        );
+        if (saved.ok && saved.path && saved.name) {
+          setGeneratedAudioSavedPath(saved.path);
+          setExternalAudioTrack({ path: saved.path, name: saved.name });
+        } else if (!saved.ok && saved.error) {
+          setAudioError(saved.error);
+        }
+      }
+    } catch (err) {
+      setAudioError(
+        err instanceof Error
+          ? err.message
+          : 'Не удалось сгенерировать звук через внешний API.',
+      );
+    } finally {
+      setIsGeneratingAudio(false);
+    }
+  }, [
+    settings.soundDescription,
+    settings.audioApiEndpoint,
+    settings.audioApiKey,
+    settings.durationSec,
+    settings.autoTranslateRuPrompt,
+    settings.localLlmUrl,
+    settings.localLlmModel,
+  ]);
 
   const handleEnhancePrompt = useCallback(async () => {
     const trimmed = prompt.trim();
@@ -760,6 +885,29 @@ export default function App() {
         originalPromptBeforeEnhance !== null,
       );
 
+      const rawSoundDescription = (runSettings.soundDescription ?? '').trim();
+      let soundDescriptionForComfy: string | undefined = rawSoundDescription || undefined;
+      if (
+        runSettings.generateAudio &&
+        (runSettings.audioStrategy ?? 'comfy-audiocraft') === 'comfy-audiocraft' &&
+        rawSoundDescription &&
+        runSettings.autoTranslateRuPrompt !== false &&
+        runSettings.localLlmUrl?.trim() &&
+        containsCyrillic(rawSoundDescription)
+      ) {
+        setProgress((prev) => ({
+          ...prev,
+          message: 'Перевод описания звука на английский (локальная LLM)...',
+        }));
+        const translatedSound = await translatePromptToEnglishViaLocalLlm(rawSoundDescription, {
+          url: runSettings.localLlmUrl,
+          model: runSettings.localLlmModel,
+        });
+        if (translatedSound) {
+          soundDescriptionForComfy = translatedSound;
+        }
+      }
+
       const result = await runComfyGeneration({
         settings: runSettings,
         positivePrompt: effectivePositivePrompt,
@@ -774,6 +922,7 @@ export default function App() {
         endFrame: runSettings.mode === 'i2v' ? endFrame : null,
         isContinuation: Boolean(extendingSourceVideo),
         fallbackCharacterAnchors,
+        soundDescription: soundDescriptionForComfy,
         signal: controller.signal,
         onProgress: setProgress,
         onSegmentCompleted: (_seg, allCompleted) => {
@@ -820,6 +969,9 @@ export default function App() {
       }
 
       const lastRenderedSeg = result.segments[result.segments.length - 1];
+      const combinedHasAudio = Boolean(
+        result.hasAudio || combinedSegments.some((seg) => Boolean(seg.hasAudio || seg.audioUrl)),
+      );
       const item: GenerationHistoryItem = {
         id: result.promptId,
         createdAt: new Date().toISOString(),
@@ -827,6 +979,8 @@ export default function App() {
         prompt: originalPromptBeforeEnhance || activePrompt,
         enhancedPrompt: originalPromptBeforeEnhance ? activePrompt : undefined,
         negativePrompt,
+        soundDescription:
+          runSettings.generateAudio && rawSoundDescription ? rawSoundDescription : undefined,
         modelId: runSettings.modelId,
         modelLabel: modelOption.shortLabel,
         width: runSettings.width,
@@ -854,6 +1008,8 @@ export default function App() {
                 filename: c.imageFilename,
               })),
         videoUrl: result.output.viewUrl,
+        ...(result.audioUrl ? { audioUrl: result.audioUrl } : {}),
+        ...(combinedHasAudio ? { hasAudio: true } : {}),
         filename: result.output.filename,
         subfolder: result.output.subfolder,
         fileType: result.output.type,
@@ -906,6 +1062,10 @@ export default function App() {
             weight: c.weight,
           })),
           videoUrl: lastDone.videoUrl,
+          ...(lastDone.audioUrl ? { audioUrl: lastDone.audioUrl } : {}),
+          ...(completedSegmentsCheckpoint.some((s) => Boolean(s.hasAudio || s.audioUrl))
+            ? { hasAudio: true }
+            : {}),
           filename: lastDone.filename,
           subfolder: lastDone.subfolder,
           fileType: lastDone.fileType,
@@ -1142,6 +1302,23 @@ export default function App() {
             false,
           );
 
+          const rawQueueSound = (runSettings.soundDescription ?? '').trim();
+          let queueSoundForComfy: string | undefined = rawQueueSound || undefined;
+          if (
+            runSettings.generateAudio &&
+            (runSettings.audioStrategy ?? 'comfy-audiocraft') === 'comfy-audiocraft' &&
+            rawQueueSound &&
+            runSettings.autoTranslateRuPrompt !== false &&
+            runSettings.localLlmUrl?.trim() &&
+            containsCyrillic(rawQueueSound)
+          ) {
+            const translatedSound = await translatePromptToEnglishViaLocalLlm(rawQueueSound, {
+              url: runSettings.localLlmUrl,
+              model: runSettings.localLlmModel,
+            });
+            if (translatedSound) queueSoundForComfy = translatedSound;
+          }
+
           const result = await runComfyGeneration({
             settings: runSettings,
             positivePrompt: effectivePositivePrompt,
@@ -1150,6 +1327,7 @@ export default function App() {
             defaultCamera: job.cameraPreset,
             startFrame: runSettings.mode === 'i2v' ? startFrameRef.current : null,
             endFrame: runSettings.mode === 'i2v' ? endFrameRef.current : null,
+            soundDescription: queueSoundForComfy,
             signal: controller.signal,
             onProgress: report,
           });
@@ -1163,6 +1341,8 @@ export default function App() {
             prompt: job.prompt,
             enhancedPrompt: promptForComfy !== job.prompt ? promptForComfy : undefined,
             negativePrompt: job.negativePrompt,
+            soundDescription:
+              runSettings.generateAudio && rawQueueSound ? rawQueueSound : undefined,
             modelId: runSettings.modelId,
             modelLabel: modelOption.shortLabel,
             width: runSettings.width,
@@ -1179,6 +1359,8 @@ export default function App() {
             seed: runSettings.seed,
             characters: [],
             videoUrl: result.output.viewUrl,
+            ...(result.audioUrl ? { audioUrl: result.audioUrl } : {}),
+            ...(result.hasAudio ? { hasAudio: true } : {}),
             filename: result.output.filename,
             subfolder: result.output.subfolder,
             fileType: result.output.type,
@@ -1353,6 +1535,8 @@ export default function App() {
       rifeEnabled: Boolean(item.rifeEnabled),
       rifeTargetFps: validRifeFps,
       shootingStyle: validStyle,
+      soundDescription: item.soundDescription ?? '',
+      generateAudio: Boolean(item.soundDescription || item.hasAudio),
     }));
     setPrompt(item.enhancedPrompt || item.prompt);
     setOriginalPromptBeforeEnhance(item.enhancedPrompt ? item.prompt : null);
@@ -1641,6 +1825,15 @@ export default function App() {
                   prompt={prompt}
                   originalPromptBeforeEnhance={originalPromptBeforeEnhance}
                   negativePrompt={negativePrompt}
+                  soundDescription={settings.soundDescription ?? ''}
+                  generateAudio={Boolean(settings.generateAudio)}
+                  audioStrategy={settings.audioStrategy ?? 'comfy-audiocraft'}
+                  hasExternalAudioEndpoint={Boolean(settings.audioApiEndpoint?.trim())}
+                  isGeneratingAudio={isGeneratingAudio}
+                  audioError={audioError}
+                  generatedAudioPreviewUrl={generatedAudioPreviewUrl}
+                  generatedAudioFilename={generatedAudioFilename}
+                  generatedAudioSavedPath={generatedAudioSavedPath}
                   characters={characters}
                   cameraPreset={cameraPreset}
                   lightingPreset={lightingPreset}
@@ -1653,6 +1846,10 @@ export default function App() {
                   disabled={isGenerating}
                   onPromptChange={handlePromptChange}
                   onNegativePromptChange={setNegativePrompt}
+                  onSoundDescriptionChange={handleSoundDescriptionChange}
+                  onGenerateAudioChange={handleGenerateAudioChange}
+                  onGenerateStandaloneAudio={() => void handleGenerateStandaloneAudio()}
+                  onSwitchToExternalAudio={handleSwitchToExternalAudio}
                   onCameraPresetChange={setCameraPreset}
                   onLightingPresetChange={setLightingPreset}
                   onEnhancePrompt={() => void handleEnhancePrompt()}
@@ -1714,6 +1911,8 @@ export default function App() {
                   onDeleteHistoryItem={handleDeleteHistoryItem}
                   onClearHistory={handleClearHistory}
                   onOpenCorsGuide={() => setActiveTab('cors')}
+                  externalAudioTrack={externalAudioTrack}
+                  onSwitchToExternalAudio={handleSwitchToExternalAudio}
                 />
               </div>
             </div>
